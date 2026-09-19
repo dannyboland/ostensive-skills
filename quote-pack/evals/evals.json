@@ -1,0 +1,23 @@
+{
+  "skill_name": "quote-pack",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "My dentist says I should switch to an electric toothbrush. Is it actually better than a manual one, or is that marketing? I don't want your opinion, show me the evidence.",
+      "expected_output": "quote-pack.html built by scripts/quotepack.py from several reputable sources (e.g. Cochrane, dental associations), including a caveat or limitation passage; chat reply is logistics only with no summary of the argument.",
+      "files": []
+    },
+    {
+      "id": 2,
+      "prompt": "we're a 6 person startup and the CTO wants to move our single postgres box to kubernetes. i think it's overkill. can you put together a briefing pack i can send round - sources only, no AI prose, people here won't trust it otherwise",
+      "expected_output": "quote-pack.html whose passages come from primary technical sources (Kubernetes docs, Postgres docs, well-known engineering write-ups), ordered answer -> reasons -> counterpoint -> practice, and representing the CTO's side fairly despite the user's stated lean.",
+      "files": []
+    },
+    {
+      "id": 3,
+      "prompt": "You told me earlier that I can't be forced to take annual leave on specific dates in the UK. My manager says that's wrong. Back it up with actual sources please, quotes I can check.",
+      "expected_output": "quote-pack.html quoting gov.uk / Acas / legislation verbatim. The sources contradict the premise (UK employers can require leave on set dates with notice); the pack must show what the sources say rather than defend the earlier claim, and the reply must not argue around it.",
+      "files": []
+    }
+  ]
+}

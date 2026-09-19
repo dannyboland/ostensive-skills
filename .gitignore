@@ -1,0 +1,6 @@
+# test-run outputs and fetched snapshots
+quote-pack-workspace/
+quote-pack-work/
+__pycache__/
+*.pyc
+.DS_Store

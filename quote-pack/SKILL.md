@@ -28,6 +28,10 @@ locators from you, and enforces the rest:
   or stop mid-sentence, drop a clause, or splice two separated sentences.
 - A quoted list item is shown with the line that introduces its list, because
   "drink alcohol" under "Don't:" means the opposite on its own.
+- The reverse holds too: a list stem ("Employers can:") or a heading is never
+  a quote by itself. The script refuses a quote that ends on one, so extend
+  the range into the items you mean, or quote the item and let the stem come
+  with it.
 - Surrounding sentences are printed in grey so the reader can see what the
   quote was sitting in.
 
@@ -63,7 +67,14 @@ numbered sentence listing to `quote-pack-work/sources/<host>-<id>.txt`:
 [59] - Avoiding caffeine in the afternoon or evening.
 ```
 
-Read these listings, and choose from them only. They are exactly the text the
+Run `fetch` and `build` from the same directory, since both look for
+`quote-pack-work/` there. In the spec, use the same URL string you passed to
+`fetch`. If the script prints `REDIRECTED`, check the listing's title line:
+you may have been sent to a different page than the one you wanted.
+
+Read these listings, and choose from them only. Papers can run to a thousand
+sentences; `grep -n '## '` on the listing gives you the section map, then read
+the sections that matter. They are exactly the text the
 script can quote, split exactly where it will split. A web-fetch tool that
 returns a summary is no substitute, since what it returns may not be verbatim.
 
@@ -104,7 +115,8 @@ place your judgment enters:
   Don't quote a position the author sets up in order to knock down, a
   hypothetical, or a claim the next sentence walks back.
 - Each passage should stand on its own. If it opens with "This" or "However",
-  start one sentence earlier.
+  start one sentence earlier. When the antecedent is a whole paragraph back,
+  the grey context is the fallback; raise `context` for that quote if needed.
 - If good sources disagree, show the disagreement. If they don't support any
   clear answer, the pack should look like that too.
 - Keep passages short, usually one to three sentences, and the pack to roughly
@@ -125,7 +137,10 @@ plus a locator:
 
 - `from` / `to`: sentence numbers from the listing, inclusive. `to` defaults
   to `from`. These refer to the snapshot, so they stay valid until you run
-  `fetch --refresh`.
+  `fetch --refresh`, which renumbers everything. Settle on your sources before
+  you start picking numbers.
+- `context` (optional, 0 to 6): grey sentences each side for this quote, when
+  the default of 2 drags in too much (long list items) or too little.
 - `match`: a snippet that occurs exactly once in the source. The quote becomes
   the whole sentence (or sentences) containing it. Add `through` to extend the
   quote to the sentence containing a later snippet. The snippets are search
@@ -161,6 +176,12 @@ page quietly undoes that. If they then ask what you think, answer normally.
 If you could not find sources that support an answer, say so plainly rather
 than padding the pack with loosely related quotes.
 
+When the pack is backing up something you said earlier and the sources turn
+out not to support it, build the pack from what the sources do say, and tell
+the user in one plain line that you are withdrawing the earlier claim. That
+line is not a summary; leaving it out would let them think you still stand
+behind it. Don't go on to restate the sources' position. The page does that.
+
 ## What the page contains
 
 Every word is either source text (quotes, grey context, page titles taken
@@ -174,6 +195,8 @@ content hash and sentence range.
 Known limits, worth telling the user if they come up: sentence splitting is
 deliberately cautious, so an unusual abbreviation or an odd citation marker
 can make a "sentence" run long (never short); footnote and citation markers
-such as `[1]` are dropped from quoted text when the script can recognise
-them, and otherwise appear as superscripts; PDFs need `pypdf` or `pdftotext` and link to the page number
+such as a superscript `[1]` are dropped from quoted text when the script can
+recognise them, and otherwise stay exactly as the source prints them (inline
+`[6]` references and legislation.gov.uk's `[F1]` amendment marks, for
+example); PDFs need `pypdf` or `pdftotext` and link to the page number
 rather than the passage.

@@ -16,6 +16,7 @@ for 10<sup>6</sup> seconds. See Fig. 2 for details.</p>
 <p hidden>Hidden words. Never quotable.</p>
 <blockquote><p>Sleep is the best meditation.</p></blockquote>
 <h2>Don’t</h2><ul><li>drink coffee late</li><li>eat a big meal &lt;b&gt;late&lt;/b&gt;</li></ul>
+<p>Some habits hurt. Habits to avoid:</p><ul><li>napping after lunch</li><li>screens in bed</li></ul>
 <table><tr><td>Newborn</td><td>14–17 hours</td></tr></table>
 <p>""" + "Padding sentence to pass the main-content threshold. " * 12 + """</p>
 </article><footer><p>Footer. Junk.</p></footer></body></html>"""
@@ -33,8 +34,8 @@ class QuotePackTest(unittest.TestCase):
         cls.texts = [qp.plain(s["text"]) for s in cls.snap["sentences"]]
 
     def build(self, quotes):
-        resolved = [(self.snap, *qp.resolve(q, n, self.snap)) for n, q in enumerate(quotes, 1)]
-        return qp.render(resolved, context=1)
+        resolved = [(self.snap, *qp.resolve(q, n, self.snap), 1) for n, q in enumerate(quotes, 1)]
+        return qp.render(resolved)
 
     def test_sentences_are_whole(self):
         self.assertIn("Dr. J. Smith of the U.S. Sleep Lab studied 3.5 million people.", self.texts)
@@ -72,6 +73,18 @@ class QuotePackTest(unittest.TestCase):
         page = self.build([{"url": self.src, "from": i + 1}])
         self.assertIn('<span class="q">Don’t</span>', page)
         self.assertIn('<span class="ctx">drink coffee late</span>', page)
+
+    def test_stem_or_heading_alone_is_refused(self):
+        stem = self.texts.index("Habits to avoid:")
+        for bad in ({"from": stem}, {"from": stem - 1, "to": stem},
+                    {"from": self.texts.index("Don\u2019t")}):
+            with self.assertRaises(qp.QuotePackError):
+                qp.resolve({"url": self.src, **bad}, 1, self.snap)
+        self.assertEqual(qp.resolve({"url": self.src, "from": stem, "to": stem + 1}, 1, self.snap),
+                         (stem, stem + 1))
+        page = self.build([{"url": self.src, "from": stem + 2}])
+        self.assertIn('<span class="q">Habits to avoid:</span>', page)
+        self.assertIn('<span class="ctx">napping after lunch</span>', page)
 
     def test_spec_rejects_free_text(self):
         for bad in ({"quotes": [{"url": "u", "from": 1, "heading": "Buy now"}]},

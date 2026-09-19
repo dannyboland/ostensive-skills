@@ -483,11 +483,34 @@ def find_span(snap, needle, after=0):
     return hits
 
 
-ALLOWED_KEYS = {"url", "from", "to", "match", "through"}
+ALLOWED_KEYS = {"url", "from", "to", "match", "through", "context"}
+
+
+def is_open_stem(text):
+    """True for a line that only introduces what follows ("Employers can:")."""
+    return SENTINELS.sub("", text).rstrip("\"'\u201d\u2019)]")[-1:] not in (".", "!", "?")
 
 
 def resolve(item, n, snap):
     """Turn one spec item into an inclusive (first, last) sentence range."""
+    first, last = locate(item, n, snap)
+    sents = snap["sentences"]
+    # A quote has to say something by itself. A heading, or the stem of a list
+    # without any of its items, is verbatim but asserts nothing.
+    if sents[last]["kind"] == "h":
+        raise QuotePackError(
+            f"quote {n}: ends on a heading ({plain(sents[last]['text'])!r}). A heading belongs "
+            "to the text after it; extend the range into that text or stop before the heading.")
+    introduces = any(s.get("lead") == last for s in sents[last + 1:])
+    if introduces and is_open_stem(sents[last]["text"]):
+        raise QuotePackError(
+            f"quote {n}: ends on a list stem ({plain(sents[last]['text'])!r}) with none of its "
+            f"items. Extend `to` to take in the items you mean, or quote just the item "
+            "(the stem is added automatically and the items between are shown in grey).")
+    return first, last
+
+
+def locate(item, n, snap):
     where = f"quote {n}"
     total = len(snap["sentences"])
     if "from" in item:
@@ -615,8 +638,7 @@ def lead_ins(snap, first, last):
     for i in range(first, last + 1):
         lead = sents[i].get("lead")
         while lead is not None and lead < first and lead not in found:
-            text = SENTINELS.sub("", sents[lead]["text"]).rstrip("\"'\u201d\u2019)]")
-            if sents[lead]["kind"] != "h" and text[-1:] in ".!?":
+            if sents[lead]["kind"] != "h" and not is_open_stem(sents[lead]["text"]):
                 break  # a complete sentence before the list; ordinary context
             found.add(lead)
             lead = sents[lead].get("lead")
@@ -665,9 +687,9 @@ def render_passage(snap, first, last, context):
     return "\n".join(out)
 
 
-def render(resolved, context):
+def render(resolved):
     cards, seen, manifest = [], [], []
-    for snap, first, last in resolved:
+    for snap, first, last, context in resolved:
         if not any(s is snap for s in seen):
             seen.append(snap)
         sents = snap["sentences"]
@@ -750,6 +772,11 @@ def cmd_fetch(args):
             n = len(snap["sentences"])
             thin = n < 15 or CHALLENGE_TITLES.search(snap["title"] or "")
             print(f"{'THIN ' if thin else 'ok   '} {url}\n      {n} sentences -> {path}")
+            moved = urllib.parse.urlparse(snap["final_url"])
+            asked = urllib.parse.urlparse(snap["url"])
+            if not snap["local"] and moved.path.rstrip("/") != asked.path.rstrip("/"):
+                print(f"      REDIRECTED to {snap['final_url']}\n"
+                      "      Check the listing's title: this may not be the page you asked for.")
             if thin:
                 print("      Very little text came back: likely a bot-challenge page or a "
                       "script-rendered shell. Read the listing before relying on it.")
@@ -774,13 +801,16 @@ def cmd_build(args):
         if last - first + 1 > args.max_sentences:
             raise QuotePackError(f"quote {n}: {last - first + 1} sentences exceeds "
                                  f"--max-sentences {args.max_sentences}")
-        resolved.append((snaps[key], first, last))
+        context = item.get("context", args.context)
+        if not isinstance(context, int) or isinstance(context, bool) or not 0 <= context <= 6:
+            raise QuotePackError(f"quote {n}: context must be an integer from 0 to 6")
+        resolved.append((snaps[key], first, last, context))
 
-    page = render(resolved, args.context)
+    page = render(resolved)
     with open(args.output, "w", encoding="utf-8") as f:
         f.write(page)
     print(f"wrote {args.output}\n")
-    for n, (snap, first, last) in enumerate(resolved, 1):
+    for n, (snap, first, last, _) in enumerate(resolved, 1):
         sents = snap["sentences"]
         text = plain(" ".join(s["text"] for s in sents[first:last + 1]))
         print(f"{n}. [{first}-{last}] {source_name(snap)}")

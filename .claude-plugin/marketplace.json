@@ -1,0 +1,14 @@
+{
+  "name": "dannyboland",
+  "description": "Danny Boland's Claude Code plugins.",
+  "owner": {
+    "name": "Danny Boland"
+  },
+  "plugins": [
+    {
+      "name": "ostensive",
+      "source": "./plugins/ostensive",
+      "description": "quote-pack (advice as a page of verbatim source passages) and quote-review (draft feedback as verbatim style guide and source passages). A script builds every page; no AI-written text appears on it."
+    }
+  ]
+}

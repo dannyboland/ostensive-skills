@@ -4,3 +4,5 @@ quote-pack-work/
 __pycache__/
 *.pyc
 .DS_Store
+quote-review-workspace/
+quote-review-work/

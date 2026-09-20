@@ -1,6 +1,6 @@
 ---
 name: quote-pack
-description: Answer a request for advice or a position with a quote-only briefing pack - one HTML page that makes the argument using only verbatim passages from sources, assembled by a script so that no AI-written prose appears on it. Use whenever the user asks for a quote pack, briefing pack, evidence pack or "sources only" answer, says they don't want to take the AI's word for something, asks to see the evidence rather than a summary, or wants advice they can verify themselves (health, money, legal, technical choices, contested facts). Also use when the user asks you to back up a position you have already given.
+description: Answer a request for advice or a position with a quote-only briefing pack - one HTML page that makes the argument using only verbatim passages from sources, assembled by a script so that no AI-written prose appears on it. Use whenever the user asks for a quote pack, briefing pack, evidence pack, an "ostensive" answer or summary, or a "sources only" / "source-only" answer or summary, says they don't want to take the AI's word for something, asks to see the evidence rather than a summary, or wants advice they can verify themselves (health, money, legal, technical choices, contested facts). Also use when the user asks you to back up a position you have already given.
 ---
 
 # Quote pack
@@ -73,8 +73,10 @@ Run `fetch` and `build` from the same directory, since both look for
 you may have been sent to a different page than the one you wanted.
 
 Read these listings, and choose from them only. Papers can run to a thousand
-sentences; `grep -n '## '` on the listing gives you the section map, then read
-the sections that matter. They are exactly the text the
+sentences; `grep '## '` on the listing gives you the section map, then read
+the sections that matter. The sentence number is the one in `[brackets]`; if
+you use `grep -n`, the number it adds in front is a file line number and will
+quote the wrong sentence without any error. They are exactly the text the
 script can quote, split exactly where it will split. A web-fetch tool that
 returns a summary is no substitute, since what it returns may not be verbatim.
 

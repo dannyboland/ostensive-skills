@@ -200,7 +200,7 @@ class BlockExtractor(HTMLParser):
             at, linked = self.sup
             inner = "".join(self.buf[at + 1:])
             before = "".join(self.buf[:at]).rstrip()[-1:]
-            if (linked and FOOTNOTE_MARK.match(inner)) or (
+            if not inner.strip() or (linked and FOOTNOTE_MARK.match(inner)) or (
                     before in ".,;:!?)\"\u201d\u2019" and CITATION_LIST.match(inner)):
                 del self.buf[at:]
             else:
@@ -687,33 +687,34 @@ def render_passage(snap, first, last, context):
     return "\n".join(out)
 
 
-def render(resolved):
-    cards, seen, manifest = [], [], []
-    for snap, first, last, context in resolved:
-        if not any(s is snap for s in seen):
-            seen.append(snap)
-        sents = snap["sentences"]
-        link, deep = fragment_link(snap, first, last)
-        notes = []
-        if snap["local"]:
-            notes.append(LABEL_LOCAL)
-        if any(s["kind"] == "bq" for s in sents[first:last + 1]):
-            notes.append(LABEL_BLOCKQUOTE)
-        page = sents[first].get("page")
-        meta = [f'<cite>{esc(snap["title"] or source_name(snap))}</cite>',
-                f'<span>{esc(source_name(snap))}</span>']
-        if page:
-            meta.append(f"<span>{LABEL_PAGE} {page}</span>")
-        if not snap["local"]:
-            meta.append(f'<a href="{esc(link)}" rel="noopener noreferrer">'
-                        f'{LABEL_OPEN if deep else LABEL_OPEN_PLAIN}</a>')
-        meta += [f'<span class="note">{esc(n)}</span>' for n in notes]
-        cards.append(f'<li><div class="passage">\n{render_passage(snap, first, last, context)}\n</div>'
-                     f'<div class="src ui">{"".join(meta)}</div></li>')
-        manifest.append({"url": snap["url"], "sha256": snap["sha256"],
-                         "retrieved": snap["retrieved"], "sentences": [first, last],
-                         "lead_ins": sorted(lead_ins(snap, first, last))})
+def render_card(snap, first, last, context):
+    """One quoted passage with its grey context and attribution line."""
+    sents = snap["sentences"]
+    link, deep = fragment_link(snap, first, last)
+    notes = []
+    if snap["local"]:
+        notes.append(LABEL_LOCAL)
+    if any(s["kind"] == "bq" for s in sents[first:last + 1]):
+        notes.append(LABEL_BLOCKQUOTE)
+    page = sents[first].get("page")
+    meta = [f'<cite>{esc(snap["title"] or source_name(snap))}</cite>',
+            f'<span>{esc(source_name(snap))}</span>']
+    if page:
+        meta.append(f"<span>{LABEL_PAGE} {page}</span>")
+    if not snap["local"]:
+        meta.append(f'<a href="{esc(link)}" rel="noopener noreferrer">'
+                    f'{LABEL_OPEN if deep else LABEL_OPEN_PLAIN}</a>')
+    meta += [f'<span class="note">{esc(n)}</span>' for n in notes]
+    return (f'<div class="passage">\n{render_passage(snap, first, last, context)}\n</div>'
+            f'<div class="src ui">{"".join(meta)}</div>')
 
+
+def manifest_entry(snap, first, last):
+    return {"url": snap["url"], "sha256": snap["sha256"], "retrieved": snap["retrieved"],
+            "sentences": [first, last], "lead_ins": sorted(lead_ins(snap, first, last))}
+
+
+def render_sources(seen):
     sources = []
     for snap in seen:
         name = esc(snap["title"] or source_name(snap))
@@ -723,6 +724,17 @@ def render(resolved):
             head = (f'<a href="{esc(snap["final_url"])}" rel="noopener noreferrer">{name}</a> '
                     f'<span>{esc(source_name(snap))}</span>')
         sources.append(f"<li>{head}<br>{LABEL_RETRIEVED} {esc(snap['retrieved'])}</li>")
+    return (f'<section class="sources ui">\n<h2>{LABEL_SOURCES}</h2>\n<ul>\n'
+            + "\n".join(sources) + "\n</ul>\n</section>")
+
+
+def render(resolved):
+    cards, seen, manifest = [], [], []
+    for snap, first, last, context in resolved:
+        if not any(s is snap for s in seen):
+            seen.append(snap)
+        cards.append(f"<li>{render_card(snap, first, last, context)}</li>")
+        manifest.append(manifest_entry(snap, first, last))
 
     data = json.dumps(manifest).replace("<", "\\u003c")
     return f"""<!doctype html>
@@ -747,12 +759,7 @@ def render(resolved):
 <ol class="pack">
 {chr(10).join(cards)}
 </ol>
-<section class="sources ui">
-<h2>{LABEL_SOURCES}</h2>
-<ul>
-{chr(10).join(sources)}
-</ul>
-</section>
+{render_sources(seen)}
 </main>
 <script type="application/json" id="quotepack-manifest">{data}</script>
 </body>
@@ -776,7 +783,8 @@ def cmd_fetch(args):
             asked = urllib.parse.urlparse(snap["url"])
             if not snap["local"] and moved.path.rstrip("/") != asked.path.rstrip("/"):
                 print(f"      REDIRECTED to {snap['final_url']}\n"
-                      "      Check the listing's title: this may not be the page you asked for.")
+                      f"      Its title is: {snap['title'] or '(none)'}\n"
+                      "      Make sure this is the page you meant.")
             if thin:
                 print("      Very little text came back: likely a bot-challenge page or a "
                       "script-rendered shell. Read the listing before relying on it.")

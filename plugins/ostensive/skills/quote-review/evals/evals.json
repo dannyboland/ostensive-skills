@@ -1,0 +1,11 @@
+{
+  "skill_name": "quote-review",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "Can you review webhooks-guide.md against the Google developer documentation style guide? I don't want rewrites or your opinions - just show me where it breaks the guide, with the guide's own words. If any of the facts are wrong, show me a source for that too.",
+      "expected_output": "quote-review.html built by quotereview.py: the draft shown as written with highlighted phrases, each beside verbatim Google style guide passages (in order to, please, passive voice, simply/easy, click here, e.g./N.B., future tense...) and sourced factual corrections (JSON was not invented by Tim Berners-Lee in 1989; HMAC-SHA256 output is 256 bits; 418 is I'm a teapot). Reply is logistics only, no rewrites.",
+      "files": ["evals/files/webhooks-guide.md"]
+    }
+  ]
+}

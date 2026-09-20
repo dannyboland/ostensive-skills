@@ -6,3 +6,9 @@ __pycache__/
 .DS_Store
 quote-review-workspace/
 quote-review-work/
+
+# copyrighted books used for local testing: never commit
+test-guides/*
+!test-guides/README.md
+*.pdf
+*.epub

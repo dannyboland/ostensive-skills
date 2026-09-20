@@ -11,6 +11,10 @@ on it.
 - **quote-review** reviews a draft: the document is shown as written, with
   highlighted phrases set beside verbatim passages from a style guide, or
   from a web source when the point is factual. No comments, no rewrites.
+  The draft can be a text, Word or RTF file or a live web page; the guide can
+  be a website, a PDF or a DRM-free EPUB, so craft books work as well as
+  house styles. A recurring habit is marked in every place it occurs beside a
+  single passage.
 
 Both enforce the same rules in code. The model's spec can hold only URLs and
 locators (plus, for a review, phrases that already exist in the document);
@@ -38,7 +42,11 @@ into `~/.claude/skills/`, or zip it for upload to claude.ai. Each folder is
 self-contained.
 
 Requires Python 3.9+, standard library only. PDF sources need `pypdf` or the
-`pdftotext` binary.
+`pdftotext` binary; RTF, DOC and ODT drafts need macOS `textutil` or `pandoc`.
+
+Books you use as guides stay on your machine. `test-guides/` is ignored by
+git, as are all `.pdf` and `.epub` files; review pages that quote a
+copyrighted book are for private use.
 
 ## Layout
 

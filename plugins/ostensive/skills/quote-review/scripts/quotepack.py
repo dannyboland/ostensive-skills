@@ -16,22 +16,32 @@ Usage:
   quotepack.py fetch URL [URL ...]      snapshot sources, write numbered listings
   quotepack.py build SPEC -o OUT.html   resolve locators and write the page
 
-Standard library only. PDF sources need `pypdf` or the `pdftotext` binary.
+  quotepack.py outline [URL ...]        headings with sentence numbers
+  quotepack.py search "words" [URL ...] keyword search over fetched sources
+  quotepack.py show FIRST [LAST]        print a run of sentences to read
+
+Standard library only. Sources: web pages, plain text, EPUB, and PDF (which
+needs `pypdf` or the `pdftotext` binary).
 """
 import argparse
 import datetime
+import glob
 import gzip
 import hashlib
 import html
 import io
 import json
+import math
 import os
+import posixpath
 import re
 import shutil
 import subprocess
 import sys
 import urllib.parse
 import urllib.request
+import zipfile
+from xml.etree import ElementTree
 from html.parser import HTMLParser
 
 DEFAULT_WORKDIR = "quote-pack-work"
@@ -54,9 +64,11 @@ LABEL_OPEN = "Open at this passage"
 LABEL_OPEN_PLAIN = "Open source"
 LABEL_RETRIEVED = "Retrieved"
 LABEL_PAGE = "Page"
+LABEL_SECTION = "Section"
 LABEL_SOURCES = "Sources"
 LABEL_LOCAL = "Local file. Readers cannot retrieve it independently."
 LABEL_BLOCKQUOTE = "The source presents this as a quotation from elsewhere."
+LABEL_INSET = "The source sets this passage apart from its main text, as an example, an excerpt or an exercise."
 
 
 class QuotePackError(Exception):
@@ -136,11 +148,14 @@ class BlockExtractor(HTMLParser):
         return "p"
 
     def _flush(self):
-        text = " ".join("".join(self.buf).split())
+        tags = {t for t, _ in self.stack}
+        if "pre" in tags:  # code and other preformatted text keeps its line breaks
+            text = "\n".join(l.rstrip() for l in "".join(self.buf).strip("\n").splitlines())
+        else:
+            text = " ".join("".join(self.buf).split())
         self.buf = []
-        if text:
-            tags = {t for t, _ in self.stack}
-            kind = self._kind()
+        if text.strip():
+            kind = "pre" if "pre" in tags else self._kind()
             self.blocks.append({"kind": kind, "text": text,
                                 "main": bool(tags & {"article", "main"}),
                                 "lead": self.lists[-1] if kind == "li" and self.lists else None})
@@ -155,7 +170,7 @@ class BlockExtractor(HTMLParser):
             if tag in ("ul", "ol"):
                 self.lists.append(self.blocks[-1] if self.blocks else None)
         elif tag == "br" or tag in CELLS:
-            self.buf.append(" ")
+            self.buf.append("\n" if any(t == "pre" for t, _ in self.stack) else " ")
         elif tag == "sup":
             self.sup = [len(self.buf), False]
             self.buf.append(SUP_OPEN)
@@ -225,15 +240,17 @@ class BlockExtractor(HTMLParser):
         self._flush()
 
 
-def html_to_blocks(markup):
+def html_to_blocks(markup, whole_page=False):
+    """Blocks of a page's main text, or with whole_page every visible block:
+    navigation and footer included, for when the page itself is under review."""
     best = None
-    for skip_chrome in (True, False):
+    for skip_chrome in ((False,) if whole_page else (True, False)):
         ex = BlockExtractor(skip_chrome=skip_chrome)
         ex.feed(markup)
         ex.close()
         blocks = ex.blocks
         main = [b for b in blocks if b["main"]]
-        if sum(len(b["text"]) for b in main) >= 500:
+        if not whole_page and sum(len(b["text"]) for b in main) >= 500:
             blocks = main
         best = (ex, blocks)
         # Malformed markup can leave a skipped tag open and swallow the page;
@@ -247,27 +264,144 @@ def html_to_blocks(markup):
                     "lead": index.get(id(b["lead"]))} for b in blocks]
 
 
-def text_to_blocks(text):
+TERMINAL = ".!?:;\u2026\"'\u201d\u2019)]*"
+CAPS_START = re.compile(r"^(?:[A-Z][A-Z'\u2019&-]*[:,]?\s+){1,}[A-Z][A-Z'\u2019&-]*\b|^\d{1,2}\.\s+\S")
+
+
+def text_to_blocks(text, extracted=False):
+    """Paragraph blocks from plain text; form feeds separate pages.
+
+    With extracted=True the text came out of a PDF, where layout leaks into
+    the text: a paragraph is cut in two by a page break or a drop capital, and
+    headings sit flush against the paragraph below them. Both are repaired
+    here, because a paragraph cut in two would yield two partial "sentences".
+    """
+    widths = sorted(len(l) for l in text.splitlines() if l.strip())
+    full = widths[int(len(widths) * 0.9)] if widths else 0
+    indents = [len(l) - len(l.lstrip()) for l in text.splitlines() if l.strip()]
+    body = max(set(indents), key=indents.count) if indents else 0
+    if extracted:
+        # a footnote number set against the end of a sentence: "present tense.1 Screenplays"
+        text = re.sub(r"(?<=[^\d\s])([.!?][\"\u201d\u2019]?)\d{1,2}(?=\s+[A-Z\u201c])", r"\1", text)
+        # a rule of dingbats ("~~~~~", "* * *") separates sections like a blank line
+        text = re.sub(r"(?m)^[^\w\n]{3,}$", "", text)
+        text = re.sub(r"[~*_=]{5,}", "\n\n", text)
+    known = set(re.findall(r"[^\W\d_]+(?:-[^\W\d_]+)*", text.lower())) if extracted else set()
+
+    def join(lines):
+        """Join a paragraph's lines, deciding each line-end hyphen on the book's own evidence."""
+        out = lines[0].strip()
+        for line in lines[1:]:
+            line = line.strip()
+            m = re.search(r"([^\W\d_]+)-$", out) if extracted else None
+            n = re.match(r"[^\W\d_]+", line)
+            if m and n and line[0].islower():
+                left, right = m.group(1).lower(), n.group(0).lower()
+                if left + "-" + right in known:
+                    out += line  # the book writes it with a hyphen elsewhere
+                elif left + right in known:
+                    out = out[:-1] + line  # an ordinary word broken across lines
+                elif left in known and right in known:
+                    out += line  # two words in their own right: a compound
+                else:
+                    out = out[:-1] + line
+            else:
+                out += " " + line
+        return " ".join(out.split())
+
+    def is_heading(line, prev_line):
+        line = line.strip()
+        return (extracted and 0 < len(line) < 0.7 * full and line[-1] not in TERMINAL + ","
+                and CAPS_START.match(line) and (not prev_line or prev_line.rstrip()[-1:] in TERMINAL))
+
     blocks = []
     for page_no, page in enumerate(text.split("\f"), 1):
         for para in re.split(r"\n\s*\n", page):
-            t = " ".join(para.split())
-            if t:
-                blocks.append({"kind": "p", "text": t, "page": page_no})
+            lines, run, prev = [l for l in para.splitlines() if l.strip()], [], ""
+            inset = (extracted and len(lines) >= 2
+                     and all(len(l) - len(l.lstrip()) >= body + 2 for l in lines))
+            groups = []  # (kind, [lines])
+            for line in lines:
+                if is_heading(line, prev):
+                    if run:
+                        groups.append(("p", run))
+                        run = []
+                    groups.append(("h", [line]))
+                else:
+                    run.append(line)
+                prev = line
+            if run:
+                groups.append(("p", run))
+            for kind, ls in groups:
+                t = join(ls)
+                last = blocks[-1] if blocks else None
+                if kind == "p" and inset:
+                    kind = "in"
+                if (extracted and last and kind in ("p", "in") and last["kind"] == kind
+                        and last["text"][-1] not in TERMINAL and t[:1].islower()):
+                    last["text"] = join([last["text"], t])  # the same paragraph, continued
+                else:
+                    blocks.append({"kind": kind, "text": t, "page": page_no})
     return blocks
 
 
+def epub_to_blocks(raw):
+    """(title, author, blocks) for an EPUB: its chapters, in reading order."""
+    try:
+        z = zipfile.ZipFile(io.BytesIO(raw))
+        container = ElementTree.fromstring(z.read("META-INF/container.xml"))
+        opf_path = next(e.get("full-path") for e in container.iter() if e.tag.endswith("rootfile"))
+        opf = ElementTree.fromstring(z.read(opf_path))
+    except (zipfile.BadZipFile, KeyError, StopIteration, ElementTree.ParseError) as e:
+        raise QuotePackError(f"not a readable EPUB ({e}); DRM-protected books can't be read")
+    local = lambda e: e.tag.rsplit("}", 1)[-1]
+    meta = {}
+    for e in opf.iter():  # a revised edition lists every author; keep them all
+        if local(e) in ("title", "creator") and (e.text or "").strip():
+            meta.setdefault(local(e), []).append(e.text.strip())
+    meta = {"title": (meta.get("title") or [""])[0], "creator": ", ".join(meta.get("creator", []))}
+    items = {e.get("id"): e.get("href") for e in opf.iter() if local(e) == "item"}
+    blocks = []
+    for ref in (e for e in opf.iter() if local(e) == "itemref"):
+        href = items.get(ref.get("idref"))
+        if not href:
+            continue
+        name = posixpath.normpath(posixpath.join(posixpath.dirname(opf_path), urllib.parse.unquote(href)))
+        try:
+            markup = z.read(name).decode("utf-8", "replace")
+        except KeyError:
+            continue
+        if "encryption" in markup[:400].lower():
+            continue
+        ex = BlockExtractor(skip_chrome=False)
+        ex.feed(markup)
+        ex.close()
+        index = {id(b): len(blocks) + i for i, b in enumerate(ex.blocks)}
+        blocks += [{"kind": b["kind"], "text": b["text"], "lead": index.get(id(b["lead"]))}
+                   for b in ex.blocks]
+    return meta.get("title", ""), meta.get("creator", ""), blocks
+
+
 def pdf_to_text(raw):
+    """(text with form feeds between pages, title, author)"""
     try:
         import pypdf  # type: ignore
         reader = pypdf.PdfReader(io.BytesIO(raw))
-        return "\f".join((p.extract_text() or "") for p in reader.pages)
+        info = reader.metadata or {}
+        return ("\f".join((p.extract_text() or "") for p in reader.pages),
+                str(info.get("/Title") or ""), str(info.get("/Author") or ""))
     except ImportError:
         pass
     if shutil.which("pdftotext"):
-        out = subprocess.run(["pdftotext", "-enc", "UTF-8", "-", "-"], input=raw,
+        # -layout keeps line-end hyphens and word spacing. The default mode closes
+        # hyphens up ("selfparody"); -raw glues a one-letter word to the next ("Atense").
+        out = subprocess.run(["pdftotext", "-layout", "-enc", "UTF-8", "-", "-"], input=raw,
                              capture_output=True, check=True)
-        return out.stdout.decode("utf-8", "replace")
+        info = {}
+        if shutil.which("pdfinfo"):
+            res = subprocess.run(["pdfinfo", "-enc", "UTF-8", "-"], input=raw, capture_output=True)
+            info = dict(re.findall(r"^(Title|Author):\s*(.+)$", res.stdout.decode("utf-8", "replace"), re.M))
+        return out.stdout.decode("utf-8", "replace"), info.get("Title", ""), info.get("Author", "")
     raise QuotePackError("PDF source needs `pip install pypdf` or the pdftotext binary")
 
 
@@ -309,6 +443,9 @@ def split_sentences(text):
             if word.isdigit() and len(before.split()) == 1:  # "1. Introduction"
                 continue
         end = m.end(2)
+        so_far = text[start:end]
+        if so_far.count("\u201c") > so_far.count("\u201d") or so_far.count('"') % 2:
+            continue  # still inside a quotation; half of it would misquote the source
         sentences.append(text[start:end])
         start = m.end()
     tail = text[start:]
@@ -363,7 +500,8 @@ def download(url, allow_local):
         with open(path, "rb") as f:
             raw = f.read()
         ext = os.path.splitext(path)[1].lower()
-        ctype = {".pdf": "application/pdf", ".txt": "text/plain", ".md": "text/plain"}.get(ext, "text/html")
+        ctype = {".pdf": "application/pdf", ".txt": "text/plain", ".md": "text/plain",
+                 ".epub": "application/epub+zip"}.get(ext, "text/html")
         return raw, ctype, canonical(url)
     req = urllib.request.Request(canonical(url), headers={
         "User-Agent": USER_AGENT,
@@ -379,11 +517,11 @@ def download(url, allow_local):
         return raw, resp.headers.get("Content-Type", ""), resp.geturl()
 
 
-def snapshot(url, workdir, refresh=False, allow_local=False):
+def snapshot(url, workdir, refresh=False, allow_local=False, whole_page=False):
     """Return the cached snapshot for url, fetching it if needed."""
     cache_dir = os.path.join(workdir, "cache")
     os.makedirs(cache_dir, exist_ok=True)
-    path = os.path.join(cache_dir, cache_key(url) + ".json")
+    path = os.path.join(cache_dir, cache_key(url) + ("-page" if whole_page else "") + ".json")
     if os.path.exists(path) and not refresh:
         with open(path, encoding="utf-8") as f:
             snap = json.load(f)
@@ -392,17 +530,22 @@ def snapshot(url, workdir, refresh=False, allow_local=False):
         return snap
 
     raw, ctype, final_url = download(url, allow_local)
+    author = ""
     if raw[:5] == b"%PDF-" or "application/pdf" in ctype:
-        kind, title, blocks = "pdf", "", text_to_blocks(pdf_to_text(raw))
+        text, title, author = pdf_to_text(raw)
+        kind, blocks = "pdf", text_to_blocks(text, extracted=True)
+    elif "epub" in ctype:
+        kind = "epub"
+        title, author, blocks = epub_to_blocks(raw)
     elif "text/plain" in ctype:
         kind, title, blocks = "text", "", text_to_blocks(decode(raw, ctype))
     else:
         kind = "html"
-        title, blocks = html_to_blocks(decode(raw, ctype))
+        title, blocks = html_to_blocks(decode(raw, ctype), whole_page)
 
     sentences, block_last = [], {}
     for bi, b in enumerate(blocks):
-        parts = [b["text"]] if b["kind"] == "h" else split_sentences(b["text"])
+        parts = [b["text"]] if b["kind"] in ("h", "pre") else split_sentences(b["text"])
         for s in parts:
             sentences.append({"block": bi, "kind": b["kind"], "text": s,
                               "page": b.get("page"), "lead": block_last.get(b.get("lead"))})
@@ -416,15 +559,20 @@ def snapshot(url, workdir, refresh=False, allow_local=False):
         "local": is_local(url),
         "type": kind,
         "title": title,
+        "author": author,
         "retrieved": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
         "sha256": hashlib.sha256(raw).hexdigest(),
         "sentences": sentences,
     }
-    with open(os.path.join(cache_dir, cache_key(url) + ".raw"), "wb") as f:
-        f.write(raw)
+    if not is_local(url):  # keep what was served; a local file is its own record
+        with open(os.path.join(cache_dir, cache_key(url) + ".raw"), "wb") as f:
+            f.write(raw)
     with open(path, "w", encoding="utf-8") as f:
         json.dump(snap, f, ensure_ascii=False)
     return snap
+
+
+MARKS = {"h": "## ", "bq": "> ", "in": "\u00bb ", "li": "- ", "row": "| ", "pre": "``` ", "p": ""}
 
 
 def write_listing(snap, workdir):
@@ -433,11 +581,12 @@ def write_listing(snap, workdir):
     os.makedirs(out_dir, exist_ok=True)
     host = urllib.parse.urlparse(snap["final_url"]).netloc or "local"
     path = os.path.join(out_dir, f"{host}-{cache_key(snap['url'])}.txt")
-    marks = {"h": "## ", "bq": "> ", "li": "- ", "row": "| ", "p": ""}
-    lines = [f"# title: {snap['title']}", f"# url: {snap['url']}",
+    marks = MARKS
+    lines = [f"# title: {snap['title']}", f"# author: {snap.get('author', '')}", f"# url: {snap['url']}",
              f"# retrieved: {snap['retrieved']}",
              "# [n] = sentence number. '## ' heading, '> ' inside a blockquote "
-             "(the source quoting someone else), '- ' list item, '| ' table row.", ""]
+             "(the source quoting someone else), '\u00bb ' set apart from the main text (an example, "
+             "excerpt or exercise: check whose words these are), '- ' list item, '| ' table row.", ""]
     prev_block = None
     for i, s in enumerate(snap["sentences"]):
         if prev_block is not None and s["block"] != prev_block:
@@ -590,8 +739,9 @@ background:var(--bg);padding:0 .5rem;font:600 12px ui-sans-serif,system-ui,sans-
 color:var(--accent)}
 .passage p{margin:0 0 .8rem}
 .passage .h{font-weight:600}
-.passage .bq{margin-left:1rem;padding-left:.9rem;border-left:2px solid var(--rule)}
+.passage .bq,.passage .in{margin-left:1rem;padding-left:.9rem;border-left:2px solid var(--rule)}
 .passage .row{font-size:.92em}
+.passage .pre{white-space:pre-wrap;font:.8em/1.5 ui-monospace,SFMono-Regular,Menlo,monospace}
 .passage .li{padding-left:1.1rem;text-indent:-1.1rem}
 .passage .li::before{content:"\\2022\\00a0\\00a0";color:var(--ctx)}
 .q{color:var(--ink);background:var(--mark);box-decoration-break:clone;
@@ -618,7 +768,7 @@ def esc(s):
 def plain(text):
     """Sentence text for terminals and listings: 10^(6), H_(2)O."""
     return (text.replace(SUP_OPEN, "^(").replace(SUB_OPEN, "_(")
-            .replace(SUP_CLOSE, ")").replace(SUB_CLOSE, ")"))
+            .replace(SUP_CLOSE, ")").replace(SUB_CLOSE, ")").replace("\n", " \u21b5 "))
 
 
 def markup(text):
@@ -645,9 +795,17 @@ def lead_ins(snap, first, last):
     return found
 
 
+def section_of(snap, first):
+    """The nearest heading above a passage, so a reader can find it in their own copy."""
+    for s in reversed(snap["sentences"][:first + 1]):
+        if s["kind"] == "h":
+            return s["text"]
+    return ""
+
+
 def source_name(snap):
     if snap["local"]:
-        return os.path.basename(local_path(snap["final_url"]))
+        return snap.get("author") or os.path.basename(local_path(snap["final_url"]))
     return urllib.parse.urlparse(snap["final_url"]).netloc
 
 
@@ -673,6 +831,8 @@ def render_passage(snap, first, last, context):
     sents = snap["sentences"]
     leads = lead_ins(snap, first, last)
     lo, hi = max(0, first - context), min(len(sents) - 1, last + context)
+    if sents[first]["kind"] == "h":
+        lo = first  # what sits above a heading belongs to the section before
     lo = min([lo, *leads])  # everything between a lead-in and its item stays visible
     while hi > last and sents[hi]["kind"] == "h":  # a trailing heading belongs to what follows
         hi -= 1
@@ -696,11 +856,16 @@ def render_card(snap, first, last, context):
         notes.append(LABEL_LOCAL)
     if any(s["kind"] == "bq" for s in sents[first:last + 1]):
         notes.append(LABEL_BLOCKQUOTE)
+    if any(s["kind"] == "in" for s in sents[first:last + 1]):
+        notes.append(LABEL_INSET)
     page = sents[first].get("page")
     meta = [f'<cite>{esc(snap["title"] or source_name(snap))}</cite>',
             f'<span>{esc(source_name(snap))}</span>']
     if page:
         meta.append(f"<span>{LABEL_PAGE} {page}</span>")
+    # headings in a PDF are guessed from layout, so its page number is the reliable pointer
+    if snap["local"] and snap["type"] != "pdf" and section_of(snap, first):
+        meta.append(f"<span>{LABEL_SECTION}: {markup(section_of(snap, first))}</span>")
     if not snap["local"]:
         meta.append(f'<a href="{esc(link)}" rel="noopener noreferrer">'
                     f'{LABEL_OPEN if deep else LABEL_OPEN_PLAIN}</a>')
@@ -794,6 +959,82 @@ def cmd_fetch(args):
     return 1 if failed else 0
 
 
+def cached_snapshots(args):
+    if args.urls:  # reading what is already fetched needs no opt-in
+        return [snapshot(u, args.workdir, allow_local=True) for u in args.urls]
+    snaps = []
+    for path in sorted(glob.glob(os.path.join(args.workdir, "cache", "*.json"))):
+        with open(path, encoding="utf-8") as f:
+            snaps.append(json.load(f))
+    if not snaps:
+        raise QuotePackError("nothing fetched yet")
+    return snaps
+
+
+def cmd_outline(args):
+    """Headings with their sentence numbers: the map of a long source."""
+    for snap in cached_snapshots(args):
+        sents = snap["sentences"]
+        print(f"# {snap['title'] or source_name(snap)}  ({snap['url']}, {len(sents)} sentences)")
+        heads = [i for i, s in enumerate(sents) if s["kind"] == "h"]
+        for i, nxt in zip(heads, heads[1:] + [len(sents)]):
+            print(f"[{i}] {plain(sents[i]['text'])}  ({nxt - i - 1})")
+        print()
+    return 0
+
+
+def cmd_show(args):
+    """Print a run of sentences as the listing has them, to read around a hit."""
+    snaps = cached_snapshots(args)
+    if len(snaps) > 1:
+        raise QuotePackError("several sources are fetched; name the one to show")
+    sents, marks = snaps[0]["sentences"], MARKS
+    first, last = max(0, args.first), min(len(sents) - 1, args.last if args.last is not None else args.first + 40)
+    for i in range(first, last + 1):
+        if i > first and sents[i]["block"] != sents[i - 1]["block"]:
+            print()
+        print(f"[{i}] {marks[sents[i]['kind']]}{plain(sents[i]['text'])}")
+    return 0
+
+
+TOKEN = re.compile(r"[^\W_]+")
+
+
+def stem(word):
+    word = word.lower()
+    for suffix in ("ations", "ation", "ingly", "ing", "ies", "ed", "ly", "es", "s"):
+        if word.endswith(suffix) and len(word) - len(suffix) >= 4:
+            return word[:-len(suffix)]
+    return word
+
+
+def cmd_search(args):
+    """Keyword search over sentences, scored with each sentence's neighbours.
+
+    This only helps the model find passages. Nothing it prints reaches a page;
+    a quote still has to be named by locator and is cut from the snapshot.
+    """
+    terms = {stem(t) for t in TOKEN.findall(args.query)}
+    hits = []
+    for snap in cached_snapshots(args):
+        sents = snap["sentences"]
+        bags = [{stem(t) for t in TOKEN.findall(SENTINELS.sub("", s["text"]))} for s in sents]
+        idf = {t: math.log(1 + len(sents) / (1 + sum(t in b for b in bags))) for t in terms}
+        for i, bag in enumerate(bags):
+            near = set().union(*bags[max(0, i - 1):i + 2])
+            score = sum(idf[t] * (1.0 if t in bag else 0.4) for t in terms if t in near)
+            if terms & bag and score:
+                hits.append((score / (1 + math.log(1 + len(bag)) / 4), snap, i))
+    hits.sort(key=lambda h: -h[0])
+    for score, snap, i in hits[:args.limit]:
+        where = section_of(snap, i)
+        print(f"{snap['title'] or source_name(snap)}" + (f" > {plain(where)}" if where else ""))
+        print(f"  [{i}] {plain(snap['sentences'][i]['text'])}\n")
+    if not hits:
+        print("no matches; try the guide's own vocabulary, or `outline` to browse its sections")
+    return 0
+
+
 def cmd_build(args):
     items = load_spec(args.spec)
     resolved, snaps = [], {}
@@ -828,6 +1069,23 @@ def cmd_build(args):
     return 0
 
 
+def add_navigation(sub, common):
+    """outline and search: shared with quotereview's command line."""
+    o = sub.add_parser("outline", parents=[common], help="list a source's headings with sentence numbers")
+    o.add_argument("urls", nargs="*", help="default: everything fetched")
+    o.set_defaults(func=cmd_outline)
+    w = sub.add_parser("show", parents=[common], help="print sentences FIRST..LAST of a fetched source")
+    w.add_argument("first", type=int)
+    w.add_argument("last", type=int, nargs="?", help="default: FIRST + 40")
+    w.add_argument("urls", nargs="*", help="needed only when several sources are fetched")
+    w.set_defaults(func=cmd_show)
+    s = sub.add_parser("search", parents=[common], help="keyword search across fetched sources")
+    s.add_argument("query")
+    s.add_argument("urls", nargs="*", help="default: everything fetched")
+    s.add_argument("--limit", type=int, default=12)
+    s.set_defaults(func=cmd_search)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -840,6 +1098,8 @@ def main():
     f.add_argument("urls", nargs="+")
     f.add_argument("--refresh", action="store_true", help="refetch even if cached")
     f.set_defaults(func=cmd_fetch)
+
+    add_navigation(sub, common)
 
     b = sub.add_parser("build", parents=[common], help="build the page from a spec")
     b.add_argument("spec")

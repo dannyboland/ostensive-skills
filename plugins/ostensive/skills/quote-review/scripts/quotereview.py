@@ -20,12 +20,18 @@ Usage:
   quotereview.py text DOCUMENT            print the document as the script reads it
   quotereview.py build SPEC -o OUT.html   resolve everything and write the page
 
-Standard library only. Documents: .md, .txt (and other plain text), .docx.
+The document may also be a web page (a URL or an .html file): the script
+captures its visible text itself and says so on the page.
+
+Standard library only. Documents: .md, .txt (and other plain text), .docx; .rtf,
+.doc and .odt where macOS textutil or pandoc is available.
 """
 import argparse
 import json
 import os
 import re
+import shutil
+import subprocess
 import sys
 import zipfile
 from xml.etree import ElementTree
@@ -52,9 +58,10 @@ LEGEND_MARK = "Highlighted phrase in the document"
 LABEL_STYLE = "Style guide"
 LABEL_FACT = "Source"
 LABEL_DOCUMENT = "Document"
+LABEL_CAPTURED = "Web page, shown as retrieved"
 
 SPEC_KEYS = {"document", "style_guides", "notes"}
-NOTE_KEYS = {"phrase", "occurrence", "cite"}
+NOTE_KEYS = {"phrase", "occurrence", "phrases", "cite"}
 
 
 # ---------------------------------------------------------------------------
@@ -122,11 +129,43 @@ def text_blocks(raw):
     return blocks
 
 
+def converted_text(path):
+    """Plain text of a word-processor file, via the converter the system provides."""
+    for cmd in (["textutil", "-convert", "txt", "-stdout", path],          # macOS
+                ["pandoc", "--to", "plain", "--wrap=none", path]):
+        if shutil.which(cmd[0]):
+            res = subprocess.run(cmd, capture_output=True)
+            if res.returncode == 0 and res.stdout.strip():
+                return res.stdout.decode("utf-8", "replace")
+    raise QuotePackError(f"{path}: can't read this format here (needs macOS textutil or pandoc); "
+                         "ask the user for a .docx, .md or .txt copy")
+
+
+def is_page(path):
+    return path.lower().startswith(("http://", "https://")) or path.lower().endswith((".html", ".htm"))
+
+
+def page_blocks(path, workdir, refresh=False):
+    """(snapshot, blocks) for a document that is a web page: every visible block, nav and
+    footer included, captured by this script so that nobody has to transcribe the page."""
+    snap = qp.snapshot(path, workdir, refresh=refresh, allow_local=True, whole_page=True)
+    blocks = []
+    for s in snap["sentences"]:
+        if s["block"] == len(blocks):
+            blocks.append({"kind": s["kind"], "text": s["text"]})
+        else:
+            blocks[-1]["text"] += " " + s["text"]
+    return snap, blocks
+
+
 def read_document(path):
     if not os.path.isfile(path):
         raise QuotePackError(f"document not found: {path}")
     if path.lower().endswith(".docx"):
         blocks = docx_blocks(path)
+    elif path.lower().endswith((".rtf", ".doc", ".odt", ".pages")):
+        # a word processor's paragraph is one line of the converted text
+        blocks = text_blocks(converted_text(path).replace("\n", "\n\n"))
     else:
         with open(path, "rb") as f:
             blocks = text_blocks(f.read().decode("utf-8", "replace"))
@@ -152,6 +191,12 @@ def find_phrase(blocks, phrase):
         folded = b["text"].translate(qp.FOLD)  # one-to-one, so offsets carry over
         hits += [(bi, m.start(), m.end()) for m in pat.finditer(folded)]
     return hits
+
+
+def note_phrases(note):
+    """The note's phrases as [{"phrase", "occurrence"?}]: one, or several sharing the note."""
+    items = note["phrases"] if "phrases" in note else [note]
+    return [{"phrase": i} if isinstance(i, str) else i for i in items]
 
 
 def locate_phrase(blocks, note, n):
@@ -186,12 +231,21 @@ def load_spec(path):
     guides = spec.get("style_guides", [])
     if not isinstance(spec["document"], str) or not isinstance(guides, list) \
             or not all(isinstance(g, str) for g in guides):
-        raise QuotePackError("document must be a path and style_guides a list of URLs")
+        raise QuotePackError("document must be a path or URL, and style_guides a list of URLs")
     if not isinstance(spec["notes"], list) or not spec["notes"]:
         raise QuotePackError("spec has no notes")
     for n, note in enumerate(spec["notes"], 1):
-        if not isinstance(note, dict) or not isinstance(note.get("phrase"), str):
-            raise QuotePackError(f"note {n}: needs a phrase")
+        if not isinstance(note, dict) or ("phrase" in note) == ("phrases" in note):
+            raise QuotePackError(f"note {n}: needs a phrase, or phrases for a habit (not both)")
+        if "phrases" in note and (not isinstance(note["phrases"], list) or not note["phrases"]
+                                  or "occurrence" in note):
+            raise QuotePackError(f"note {n}: phrases must be a non-empty list; put any "
+                                 'occurrence inside the item, {"phrase": ..., "occurrence": 2}')
+        for item in note_phrases(note):
+            if not isinstance(item, dict) or not isinstance(item.get("phrase"), str) \
+                    or ("phrases" in note and set(item) - {"phrase", "occurrence"}):
+                raise QuotePackError(f"note {n}: each phrase is a string or "
+                                     '{"phrase": ..., "occurrence": n}')
         if set(note) - NOTE_KEYS:
             raise QuotePackError(f"note {n}: unknown keys {sorted(set(note) - NOTE_KEYS)}. {free_text}")
         cites = note.get("cite")
@@ -213,7 +267,7 @@ def load_spec(path):
 CSS = """
 main.review{max-width:74rem}
 .docname{margin:2.5rem 0 1rem;padding-bottom:.6rem;border-bottom:1px solid var(--rule)}
-.row{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,26rem);gap:0 2.5rem;align-items:start}
+.pair{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,26rem);gap:0 2.5rem;align-items:start}
 .doc p,.doc pre{margin:0 0 1rem}
 .doc .h{font-weight:600;font-size:1.15em;margin-top:.6rem}
 .doc .li{padding-left:1.1rem}
@@ -228,7 +282,7 @@ vertical-align:super;padding:0 .15em}
 .card{background:var(--card);border:1px solid var(--rule);border-radius:6px;
 padding:1rem 1.1rem .8rem;font-size:15px;line-height:1.55;scroll-margin-top:4rem}
 .card:target{border-color:var(--accent)}
-.card .tag{display:flex;gap:.6rem;align-items:baseline;margin-bottom:.6rem}
+.card .tag{display:flex;flex-wrap:wrap;gap:.2rem .6rem;align-items:baseline;margin-bottom:.6rem}
 .card .tag a{font-weight:600;color:var(--accent);text-decoration:none}
 .card .tag span{letter-spacing:.1em;text-transform:uppercase;font-size:11px}
 .card .passage+.src{margin-bottom:.4rem}
@@ -236,7 +290,7 @@ padding:1rem 1.1rem .8rem;font-size:15px;line-height:1.55;scroll-margin-top:4rem
 :root{--hl:#fde9b8;--hl-strong:#f9d272}
 @media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--hl:#4a3a12;--hl-strong:#6b5316}}
 :root[data-theme="dark"]{--hl:#4a3a12;--hl-strong:#6b5316}
-@media (max-width:60rem){.row{grid-template-columns:minmax(0,1fr)}.notes{margin-left:1rem}}
+@media (max-width:60rem){.pair{grid-template-columns:minmax(0,1fr)}.notes{margin-left:1rem}}
 @media print{.card{break-inside:avoid}}
 """
 
@@ -244,25 +298,36 @@ padding:1rem 1.1rem .8rem;font-size:15px;line-height:1.55;scroll-margin-top:4rem
 def render_block(block, marks):
     """The block's text as written, with <mark> around each highlighted span."""
     text, out, pos = block["text"], [], 0
-    for n, start, end in sorted(marks, key=lambda m: m[1]):
-        out.append(esc(text[pos:start]))
-        out.append(f'<mark id="h{n}">{esc(text[start:end])}</mark><a class="ref" href="#n{n}">{n}</a>')
+    for label, start, end in sorted(marks, key=lambda m: m[1]):
+        n = label.rstrip("abcdefghijklmnopqrstuvwxyz")
+        out.append(qp.markup(text[pos:start]))
+        out.append(f'<mark id="h{label}">{qp.markup(text[start:end])}</mark>'
+                   f'<a class="ref" href="#n{n}">{label}</a>')
         pos = end
-    out.append(esc(text[pos:]))
+    out.append(qp.markup(text[pos:]))
     tag = "pre" if block["kind"] == "pre" else "p"
     return f'<{tag} class="{block["kind"]}">{"".join(out)}</{tag}>'
 
 
-def render(doc_name, blocks, notes):
-    """notes: [(n, block index, start, end, [(label, snap, first, last, context)])]"""
-    by_block, seen, manifest = {}, [], []
+def span_labels(n, spans):
+    """"3" for a note with one phrase; "3a", "3b", ... when a habit is marked in several places."""
+    if len(spans) == 1:
+        return [str(n)]
+    letters = "abcdefghijklmnopqrstuvwxyz"
+    return [f"{n}{letters[i % 26] * (i // 26 + 1)}" for i in range(len(spans))]
+
+
+def render(doc_line, blocks, notes, doc_entry=None):
+    """notes: [(n, [(block index, start, end), ...], [(label, snap, first, last, context)])]"""
+    cards_at, marks_at, seen, manifest = {}, {}, [], [doc_entry] if doc_entry else []
     for note in notes:
-        by_block.setdefault(note[1], []).append(note)
+        cards_at.setdefault(note[1][0][0], []).append(note)  # the card sits by the first instance
+        for label, (bi, start, end) in zip(span_labels(note[0], note[1]), note[1]):
+            marks_at.setdefault(bi, []).append((label, start, end))
     rows = []
     for bi, block in enumerate(blocks):
-        here = by_block.get(bi, [])
         cards = []
-        for n, _, start, end, cites in here:
+        for n, spans, cites in cards_at.get(bi, []):
             parts = []
             for label, snap, first, last, context in cites:
                 if not any(s is snap for s in seen):
@@ -270,9 +335,10 @@ def render(doc_name, blocks, notes):
                 parts.append(qp.render_card(snap, first, last, context))
                 manifest.append({"note": n, "kind": label, **qp.manifest_entry(snap, first, last)})
             labels = " / ".join(dict.fromkeys(c[0] for c in cites))
+            links = " ".join(f'<a href="#h{l}">{l}</a>' for l in span_labels(n, spans))
             cards.append(f'<div class="card" id="n{n}"><div class="tag ui">'
-                         f'<a href="#h{n}">{n}</a><span>{labels}</span></div>{"".join(parts)}</div>')
-        rows.append(f'<section class="row"><div class="doc">{render_block(block, [m[:1] + m[2:4] for m in here])}'
+                         f'{links}<span>{labels}</span></div>{"".join(parts)}</div>')
+        rows.append(f'<section class="pair"><div class="doc">{render_block(block, marks_at.get(bi, []))}'
                     f'</div><aside class="notes">{"".join(cards)}</aside></section>')
 
     data = json.dumps(manifest).replace("<", "\\u003c")
@@ -296,7 +362,7 @@ def render(doc_name, blocks, notes):
 <li><span class="ctx">Aa</span> {qp.LEGEND_CONTEXT}</li>
 </ul>
 </header>
-<p class="docname ui">{LABEL_DOCUMENT}: {esc(doc_name)}</p>
+<p class="docname ui">{doc_line}</p>
 {chr(10).join(rows)}
 {qp.render_sources(seen)}
 </main>
@@ -310,24 +376,44 @@ def render(doc_name, blocks, notes):
 # Commands
 # ---------------------------------------------------------------------------
 def cmd_text(args):
-    for b in read_document(args.document):
-        print(b["text"] + "\n")
+    if is_page(args.document):
+        blocks = page_blocks(args.document, args.workdir, refresh=args.refresh)[1]
+    else:
+        blocks = read_document(args.document)
+    for b in blocks:
+        print(qp.plain(b["text"]).replace(" \u21b5 ", "\n") + "\n")
     return 0
 
 
 def cmd_build(args):
     spec = load_spec(args.spec)
-    blocks = read_document(spec["document"])
+    doc, doc_entry = spec["document"], None
+    if is_page(doc):
+        page, blocks = page_blocks(doc, args.workdir)
+        where = qp.source_name(page)
+        if not page["local"]:
+            where = f'<a href="{esc(page["final_url"])}" rel="noopener noreferrer">{esc(where)}</a>'
+        doc_line = (f'{LABEL_DOCUMENT}: {esc(page["title"] or qp.source_name(page))} &middot; {where}<br>'
+                    f'{LABEL_CAPTURED} &middot; {qp.LABEL_RETRIEVED} {esc(page["retrieved"])}')
+        doc_entry = {"document": page["url"], "sha256": page["sha256"], "retrieved": page["retrieved"]}
+    else:
+        blocks = read_document(doc)
+        doc_line = f"{LABEL_DOCUMENT}: {esc(os.path.basename(doc))}"
     guides = {qp.cache_key(u) for u in spec.get("style_guides", [])}
 
     notes, taken, snaps = [], [], {}
     for n, note in enumerate(spec["notes"], 1):
-        bi, start, end = locate_phrase(blocks, note, n)
-        for other, obi, ostart, oend in taken:
-            if obi == bi and start < oend and ostart < end:
-                raise QuotePackError(f"note {n}: overlaps note {other}. Use one note with "
-                                     "several citations instead.")
-        taken.append((n, bi, start, end))
+        spans = []
+        for item in note_phrases(note):
+            bi, start, end = locate_phrase(blocks, item, n)
+            for other, obi, ostart, oend in taken:
+                if obi == bi and start < oend and ostart < end:
+                    raise QuotePackError(
+                        f"note {n}: {item['phrase']!r} overlaps a phrase of note {other}. "
+                        "Use one note with several citations instead.")
+            taken.append((n, bi, start, end))
+            spans.append((bi, start, end))
+        spans.sort()
         cites = []
         for c in note["cite"]:
             key = qp.cache_key(c["url"])
@@ -348,7 +434,7 @@ def cmd_build(args):
             if not isinstance(context, int) or isinstance(context, bool) or not 0 <= context <= 6:
                 raise QuotePackError(f"note {n}: context must be an integer from 0 to 6")
             cites.append((LABEL_STYLE if key in guides else LABEL_FACT, snaps[key], first, last, context))
-        notes.append((n, bi, start, end, cites))
+        notes.append((n, spans, cites))
 
     # A guide URL that is listed but never cited, or cited but not listed, is
     # usually a typo, and would quietly put the wrong label on a card.
@@ -363,14 +449,15 @@ def cmd_build(args):
                   "         Add it to style_guides if it is a guide page.")
 
     # Number the notes in reading order, whatever order the spec listed them in.
-    notes.sort(key=lambda x: (x[1], x[2]))
+    notes.sort(key=lambda x: x[1][0])
     notes = [(i,) + note[1:] for i, note in enumerate(notes, 1)]
 
     with open(args.output, "w", encoding="utf-8") as f:
-        f.write(render(os.path.basename(spec["document"]), blocks, notes))
+        f.write(render(doc_line, blocks, notes, doc_entry))
     print(f"wrote {args.output}\n")
-    for n, bi, start, end, cites in notes:
-        print(f"{n}. “{blocks[bi]['text'][start:end]}”")
+    for n, spans, cites in notes:
+        for label, (bi, start, end) in zip(span_labels(n, spans), spans):
+            print(f"{label}. “{qp.plain(blocks[bi]['text'][start:end])}”")
         for label, snap, first, last, _ in cites:
             sents = snap["sentences"]
             print(f"   {label} [{first}-{last}] {qp.source_name(snap)}")
@@ -394,8 +481,11 @@ def main():
     f.add_argument("--refresh", action="store_true", help="refetch even if cached")
     f.set_defaults(func=qp.cmd_fetch)
 
-    t = sub.add_parser("text", help="print the document as the script reads it")
+    qp.add_navigation(sub, common)
+
+    t = sub.add_parser("text", parents=[common], help="print the document as the script reads it")
     t.add_argument("document")
+    t.add_argument("--refresh", action="store_true", help="recapture a web page")
     t.set_defaults(func=cmd_text)
 
     b = sub.add_parser("build", parents=[common], help="build the review page from a spec")

@@ -74,7 +74,12 @@ you may have been sent to a different page than the one you wanted.
 
 Read these listings, and choose from them only. Papers can run to a thousand
 sentences; `grep '## '` on the listing gives you the section map, then read
-the sections that matter. The sentence number is the one in `[brackets]`; if
+the sections that matter. The script can also do this for you:
+`quotepack.py outline` lists every heading with its sentence number,
+`quotepack.py show 412 450` prints that run of sentences, and
+`quotepack.py search "words"` ranks sentences across everything fetched.
+Neither puts anything on the page; they only help you find passages. The
+sentence number is the one in `[brackets]`; if
 you use `grep -n`, the number it adds in front is a file line number and will
 quote the wrong sentence without any error. They are exactly the text the
 script can quote, split exactly where it will split. A web-fetch tool that
@@ -91,8 +96,9 @@ usually works.
 If a fetch fails (paywall, bot block, a page rendered by JavaScript), pick a
 different source. Don't paste the text into a local file to get around it;
 that would make you the author of the "source". `--allow-local` exists for
-documents the user gives you, and the page flags those as not independently
-retrievable.
+documents the user gives you (text, PDF, or a DRM-free EPUB), and the page
+flags those as not independently retrievable, showing the title, author and
+section instead of a link.
 
 Markers in the listing: `## ` heading, `- ` list item, `| ` table row, and
 `> ` text inside a blockquote, meaning the source is itself quoting someone

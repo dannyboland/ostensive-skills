@@ -45,27 +45,42 @@ that already exist in the document, and locators into fetched sources.
 
 ### 1. Settle the document and the style guide
 
-You need the path of the draft (`.md`, `.txt` or other plain text, `.docx`)
+You need the draft: a file (`.md`, `.txt` or other plain text, `.docx`;
+`.rtf`, `.doc` and `.odt` too where macOS `textutil` or `pandoc` exists), or
+a web page, given as its URL or an `.html` file
 and the style guide to review against. If the user hasn't named a guide and
 the project doesn't make it obvious, ask which one they write to; the choice
 is theirs, and a review against the wrong guide is noise. Public guides are
 usually one page per topic (Google's developer style guide, GOV.UK's A to Z,
 Microsoft's), so expect to fetch several pages of the same guide.
 
-A guide the user gives you as a local file works with `--allow-local`; the
-page flags it as a local file.
+A guide the user gives you as a local file works with `--allow-local`: a
+PDF, plain text or markdown, or a DRM-free EPUB. This is how book-length
+guides come in (Williams' *Style*, Le Guin's *Steering the Craft*, Strunk), and
+also the user's own workshop notes or house rules. Each note then shows the
+book's title, author and section, and says it is a local file. Several guides
+can be used in one review; list them all in `style_guides`. See "Book-length
+guides" below before you start on one.
 
-For a `.docx`, run `quotereview.py text DOC` to read the text the way the
-script sees it.
+For anything that isn't plain text, run `quotereview.py text DOC` to read the
+text the way the script sees it.
+
+When the thing to review is a live page, put the URL in `document` and let
+the script capture it. Don't save the page's text to a file yourself: deciding
+what counts as the page is an editorial act, and it would leave no record.
+The script takes every visible block in order, navigation and footer
+included, keeps code blocks line for line, and prints the address and
+retrieval time on the review. If the user has the page's source in a repo and
+wants that reviewed instead, use the source file.
 
 ### 2. Read the draft and decide what deserves a note
 
 Read the whole draft first. Note the places where it departs from the guide,
 and any factual claim you have real reason to doubt. Be selective: a page
 with forty highlights gets ignored. Prefer the departures that affect a
-reader, and where the same problem recurs, highlight the first one or two
-instances rather than all of them (a second one is worth it when it sits in a
-different section, where the author may not make the connection).
+reader. Where the same problem recurs, make it one note with several
+`phrases` (see step 4) so the page shows a habit, instead of several notes
+that quote the same passage or one note that looks like a one-off.
 
 ### 3. Snapshot the guide pages and sources
 
@@ -90,6 +105,63 @@ explain it, so pick the sentence that plainly states what is true. If you
 can't find a source that says it, leave the claim unhighlighted and mention
 it in your chat reply instead.
 
+### Book-length guides
+
+A book is fetched once into one long listing, often thousands of sentences,
+so you navigate it instead of reading it top to bottom:
+
+```bash
+python3 <skill>/scripts/quotereview.py fetch --allow-local steering-the-craft.epub
+python3 <skill>/scripts/quotereview.py outline            # headings + sentence numbers
+python3 <skill>/scripts/quotereview.py show 671 716       # read that run of sentences
+python3 <skill>/scripts/quotereview.py search "adverbs qualifiers"
+```
+
+`outline` is the table of contents with sentence numbers, and in a craft book
+the chapter titles are usually the topic index you need. `show` prints a run
+of sentences, so you can read a chapter without reaching for `grep -n`.
+`search` ranks sentences by keyword across everything fetched and shows the
+section each hit is in; it only matches words, so use the guide's vocabulary
+as well as your own ("needless words" as well as "wordy", "what tells" as well
+as "show, don't tell"), and treat a hit as a place to start reading, never as
+the quote.
+
+Read by chapter, not by hit. An author's defence of a construction usually
+sits in the same paragraph as the complaint about it ("I could almost state
+this as a rule, but I won't"), and you only see the pair by reading the
+passage through. That is what lets you leave alone what the author would
+defend, and quote the qualification when you do flag something. These tools only help you find passages: nothing
+they print reaches the page.
+
+For a short guide, or once you know which chapters matter, the better order
+is guide first, draft second: read the relevant chapters, then read the draft
+with them in mind. You will catch what the guide cares about, which is not
+always what you would have flagged.
+
+Craft books argue more than they legislate. Le Guin or Williams will often
+give a principle, the reasoning, and when to break it. Quote the sentence
+that states the principle, and keep the author's own qualification when it
+bears on the phrase you highlighted. Such arguments often run longer than
+the quote limit; give the note two citations (the complaint, then the
+defence) instead of one long one. In a rulebook the rule is often a
+heading ("13. Omit needless words."); start the range at the heading and
+carry it into the text below, since a heading can't be quoted alone. Skip
+the author's exercises and their examples of bad writing, unless the example
+is the point and its framing sentence comes with it.
+
+Craft books are full of other people's prose: pages of Twain, Austen or
+Woolf quoted as examples, sample sentences, exercise instructions. In the
+listing, lines marked `» ` are set apart from the main text (in a PDF this
+is judged from indentation) and lines marked `> ` are blockquotes. Check
+whose words those are before citing one: the card will carry the book
+author's name, and the page adds a line saying the passage is set apart, but
+it is the author's own argument the user asked for.
+
+Notes, such as workshop handouts, tend to be fragments. They quote fine, but
+a fragment has to make sense to someone who wasn't in the room; prefer the
+lines that do. Use only notes the user gives you. Writing up notes yourself
+and citing them would put your words on the page by the back door.
+
 ### 4. Write the spec
 
 ```json
@@ -110,6 +182,14 @@ it in your chat reply instead.
   inside one paragraph and must not overlap another note's phrase. If it
   occurs more than once, lengthen it or add `"occurrence": 2`. Highlight the
   few words that are the problem, not the whole sentence.
+- `phrases`: use this in place of `phrase` when the same fault is a habit.
+  List each place it occurs, as strings or `{"phrase": ..., "occurrence": 2}`,
+  and give the passage once: `{"phrases": ["heaves a sigh", "makes leisurely
+  progress", "picks up her pace"], "cite": [...]}`. The page marks them 3a,
+  3b, 3c beside a single card, which shows the author that it is a pattern
+  without anyone saying so. Prefer this to repeating a citation, and to
+  marking one instance and hoping they generalise. Keep it to real instances
+  of the same thing; five or six is plenty.
 - `cite`: one or more passages. Each has a `url` and a locator, the same as
   in quote-pack: `from`/`to` sentence numbers from the listing, or a `match`
   snippet (optionally with `through`) that occurs exactly once in the source.
@@ -146,10 +226,16 @@ Keep the chat reply to logistics: where the page is, how many notes, which
 guide pages and sources were used, anything that failed to fetch. Don't
 restate the notes, and don't offer rewrites there either; putting your
 suggestions in chat next to a page built to contain none undoes the point.
-Three things do belong in the reply, briefly: a factual doubt you couldn't
-find a source for, a problem the guide has no rule about, and a rule the
-draft breaks by leaving something out (see Known limits). Say each in a line,
-naming the guide page for the last kind, and leave it there. If the user then asks for your own edits, give them.
+Four things do belong in the reply, briefly: a factual doubt you couldn't
+find a source for, a problem the guide has no rule about, a rule the draft
+breaks by leaving something out (see Known limits), and anything you chose
+not to highlight because the guide defends it (deliberate repetition under a
+guide that argues for repetition). Say each in a line, naming the guide's
+section where there is one, and leave it there. List every note you dropped
+for want of a passage, not just one: the author needs to know what the page
+could not say, and a second guide may cover it. One craft book rarely covers
+a whole story; if several dropped notes share a gap (emotion told instead of
+shown, register, dialogue tags), say which kind of guide would fill it. If the user then asks for your own edits, give them.
 
 ## What the page contains
 

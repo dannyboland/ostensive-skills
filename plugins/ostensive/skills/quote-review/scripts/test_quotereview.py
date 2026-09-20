@@ -84,6 +84,41 @@ class QuoteReviewTest(unittest.TestCase):
         self.assertIn('id="h2"', self.build([{"phrase": "In order to", "occurrence": 1, "cite": c},
                                              {"phrase": "In order to", "occurrence": 2, "cite": c}]))
 
+    def test_a_habit_is_several_phrases_under_one_note(self):
+        page = self.build([{"phrases": ["Please", {"phrase": "In order to", "occurrence": 2}, "ship"],
+                            "cite": self.cite("instead, use to")}])
+        for label in ("1a", "1b", "1c"):
+            self.assertIn(f'<mark id="h{label}">', page)
+            self.assertIn(f'<a href="#h{label}">{label}</a>', page)
+        self.assertEqual(page.count('class="card"'), 1)
+        self.assertLess(page.index('id="h1a">ship'), page.index('id="h1b">Please'))  # reading order
+        with self.assertRaises(qr.QuotePackError):
+            self.build([{"phrase": "ship", "phrases": ["Please"], "cite": self.cite("active voice")}])
+        with self.assertRaises(qr.QuotePackError):
+            self.build([{"phrases": ["ship", {"phrase": "Please", "comment": "x"}],
+                         "cite": self.cite("active voice")}])
+
+    def test_a_web_page_can_be_the_document(self):
+        page_path = os.path.join(self.dir, "site.html")
+        with open(page_path, "w", encoding="utf-8") as f:
+            f.write("<html><head><title>Acme</title></head><body><nav><a>Docs</a></nav><main>"
+                    "<h1>Acme proxy</h1><p>In order to start, run it.</p>"
+                    "<pre><code>acme up\nacme status</code></pre></main>"
+                    "<footer><p>MIT licensed.</p></footer></body></html>")
+        spec = os.path.join(self.dir, "spec.json")
+        with open(spec, "w") as f:
+            json.dump({"document": page_path, "style_guides": [self.guide],
+                       "notes": [{"phrase": "In order to", "cite": self.cite("instead, use to")},
+                                 {"phrase": "MIT licensed", "cite": self.cite("active voice")}]}, f)
+        out = os.path.join(self.dir, "out.html")
+        qr.cmd_build(SimpleNamespace(spec=spec, output=out, workdir=os.path.join(self.dir, "w"),
+                                     allow_local=True, context=1, max_sentences=6))
+        page = open(out, encoding="utf-8").read()
+        self.assertIn("Web page, shown as retrieved", page)
+        self.assertIn('<pre class="pre">acme up\nacme status</pre>', page)  # code keeps its lines
+        self.assertIn(">Docs<", page)  # nav and footer are part of the page under review
+        self.assertIn('<mark id="h2">MIT licensed</mark>', page)
+
     def test_spec_has_no_room_for_model_text(self):
         c = self.cite("active voice")
         for notes in ([{"phrase": "ship", "cite": c, "comment": "tighten this"}],

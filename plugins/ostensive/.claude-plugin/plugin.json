@@ -1,7 +1,7 @@
 {
   "name": "ostensive",
   "description": "Ostensive: showing by pointing. Skills that answer and review using only other people's words: a script assembles verbatim, whole-sentence passages from cited sources, and no AI-written text appears on the page.",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "author": {
     "name": "Danny Boland"
   },

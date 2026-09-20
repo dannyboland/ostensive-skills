@@ -42,6 +42,12 @@ class QuotePackTest(unittest.TestCase):
         self.assertIn("See Fig. 2 for details.", self.texts)
         self.assertIn("“Is that enough?” she asked.", self.texts)
 
+    def test_no_split_inside_a_quotation(self):
+        text = "It\u2019s a noise\u2014\u201cHe was walking. Suddenly he saw her.\u201d Then more. \"One. Two,\" she said."
+        self.assertEqual(qp.split_sentences(text),
+                         ["It\u2019s a noise\u2014\u201cHe was walking. Suddenly he saw her.\u201d",
+                          "Then more.", "\"One. Two,\" she said."])
+
     def test_footnote_dropped_but_exponent_kept(self):
         self.assertIn("Adults need 7–9 hours, e.g. eight.", self.texts)
         self.assertIn("It ran for 10^(6) seconds.", self.texts)
@@ -111,6 +117,47 @@ class QuotePackTest(unittest.TestCase):
                            [v for k, v in vars(qp).items()
                             if k.isupper() and isinstance(v, str) and k != "CSS"])
         self.assertEqual(words - set(re.findall(r"[^\W\d_]+", allowed)), set())
+
+    def test_epub_chapters_metadata_and_section(self):
+        import zipfile
+        path = os.path.join(self.tmp.name, "guide.epub")
+        chapter = "<html><body><h2>%s</h2><p>%s</p></body></html>"
+        with zipfile.ZipFile(path, "w") as z:
+            z.writestr("mimetype", "application/epub+zip")
+            z.writestr("META-INF/container.xml", '<container xmlns="urn:oasis:names:tc:opendocument:'
+                       'xmlns:container"><rootfiles><rootfile full-path="OPS/book.opf"/></rootfiles></container>')
+            z.writestr("OPS/book.opf", '<package xmlns="http://www.idpf.org/2007/opf" '
+                       'xmlns:dc="http://purl.org/dc/elements/1.1/"><metadata><dc:title>Craft</dc:title>'
+                       '<dc:creator>A. Writer</dc:creator><dc:creator>B. Reviser</dc:creator></metadata><manifest>'
+                       '<item id="b" href="two.xhtml"/><item id="a" href="one.xhtml"/></manifest>'
+                       '<spine><itemref idref="a"/><itemref idref="b"/></spine></package>')
+            z.writestr("OPS/one.xhtml", chapter % ("Rhythm", "Read it aloud. Listen for the beat."))
+            z.writestr("OPS/two.xhtml", chapter % ("Adverbs", "Cut most of them. Keep the ones that work."))
+        snap = qp.snapshot(path, self.work, allow_local=True)
+        texts = [s["text"] for s in snap["sentences"]]
+        self.assertEqual((snap["title"], snap["author"]), ("Craft", "A. Writer, B. Reviser"))
+        self.assertEqual(texts[:2] + texts[3:5], ["Rhythm", "Read it aloud.", "Adverbs", "Cut most of them."])
+        i = texts.index("Cut most of them.")
+        self.assertEqual(qp.section_of(snap, i), "Adverbs")
+        card = qp.render_card(snap, i, i, 1)
+        self.assertIn("A. Writer", card)
+        self.assertIn("Section: Adverbs", card)
+
+    def test_pdf_text_repairs_page_breaks_and_finds_headings(self):
+        wide = "This line is as wide as the body text of the book usually runs on a page."
+        text = "\n".join([wide, wide, "It takes craft.", "OPINION PIECE: ON COMMAS",
+                          "Do we expect somebody to play the violin without learning the",
+                          "", "\fviolin? Of course not.", "", "the captain full speed ahead"])
+        blocks = qp.text_to_blocks(text, extracted=True)
+        self.assertEqual([b["kind"] for b in blocks], ["p", "h", "p", "p"])
+        self.assertEqual(blocks[1]["text"], "OPINION PIECE: ON COMMAS")
+        self.assertTrue(blocks[2]["text"].endswith("without learning the violin? Of course not."))
+        inset = qp.text_to_blocks("\n".join([wide, wide + " It is so.1", "Next comes this.", "",
+                                             "    An example set in", "    from the margin."]), extracted=True)
+        self.assertEqual([b["kind"] for b in inset], ["p", "in"])
+        self.assertIn("It is so. Next comes this.", inset[0]["text"])
+        # plain text files are taken as typed: no repairs
+        self.assertEqual(len(qp.text_to_blocks("cut the\n\nline here")), 2)
 
     def test_local_sources_need_opt_in(self):
         with self.assertRaises(qp.QuotePackError):

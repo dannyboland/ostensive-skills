@@ -37,8 +37,8 @@ import zipfile
 from xml.etree import ElementTree
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import quotepack as qp  # noqa: E402
-from quotepack import QuotePackError, esc  # noqa: E402
+import quotepack as qp
+from quotepack import QuotePackError, esc
 
 DEFAULT_WORKDIR = "quote-review-work"
 
@@ -220,8 +220,7 @@ def locate_phrase(blocks, note, n):
 # Spec
 # ---------------------------------------------------------------------------
 def load_spec(path):
-    with open(path, encoding="utf-8") as f:
-        spec = json.load(f)
+    spec = qp.read_json(path)
     free_text = ("The spec carries only a document path, URLs, phrases that already exist in "
                  "the document, and locators; comments and suggestions are not possible by design.")
     if not isinstance(spec, dict) or not {"document", "notes"} <= set(spec):
@@ -335,7 +334,7 @@ def render(doc_line, blocks, notes, doc_entry=None):
                 parts.append(qp.render_card(snap, first, last, context))
                 manifest.append({"note": n, "kind": label, **qp.manifest_entry(snap, first, last)})
             labels = " / ".join(dict.fromkeys(c[0] for c in cites))
-            links = " ".join(f'<a href="#h{l}">{l}</a>' for l in span_labels(n, spans))
+            links = " ".join(f'<a href="#h{label}">{label}</a>' for label in span_labels(n, spans))
             cards.append(f'<div class="card" id="n{n}"><div class="tag ui">'
                          f'{links}<span>{labels}</span></div>{"".join(parts)}</div>')
         rows.append(f'<section class="pair"><div class="doc">{render_block(block, marks_at.get(bi, []))}'
@@ -426,7 +425,7 @@ def cmd_build(args):
             try:
                 first, last = qp.resolve(c, n, snaps[key])
             except QuotePackError as e:
-                raise QuotePackError(str(e).replace(f"quote {n}:", f"note {n}:", 1))
+                raise QuotePackError(str(e).replace(f"quote {n}:", f"note {n}:", 1)) from e
             if last - first + 1 > args.max_sentences:
                 raise QuotePackError(f"note {n}: {last - first + 1} sentences exceeds "
                                      f"--max-sentences {args.max_sentences}")
@@ -450,7 +449,7 @@ def cmd_build(args):
 
     # Number the notes in reading order, whatever order the spec listed them in.
     notes.sort(key=lambda x: x[1][0])
-    notes = [(i,) + note[1:] for i, note in enumerate(notes, 1)]
+    notes = [(i, *note[1:]) for i, note in enumerate(notes, 1)]
 
     with open(args.output, "w", encoding="utf-8") as f:
         f.write(render(doc_line, blocks, notes, doc_entry))
@@ -498,7 +497,7 @@ def main():
     args = ap.parse_args()
     try:
         sys.exit(args.func(args))
-    except QuotePackError as e:
+    except (QuotePackError, OSError) as e:
         sys.exit(f"error: {e}")
 
 

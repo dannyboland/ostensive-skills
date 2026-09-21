@@ -118,6 +118,9 @@ class QuoteReviewTest(unittest.TestCase):
         self.assertIn('<pre class="pre">acme up\nacme status</pre>', page)  # code keeps its lines
         self.assertIn(">Docs<", page)  # nav and footer are part of the page under review
         self.assertIn('<mark id="h2">MIT licensed</mark>', page)
+        # the captured document is kept apart from the sources that navigation reads
+        snaps = qp.cached_snapshots(SimpleNamespace(workdir=os.path.join(self.dir, "w"), urls=[]))
+        self.assertEqual([s["title"] for s in snaps], ["House Style"])
 
     def test_spec_has_no_room_for_model_text(self):
         c = self.cite("active voice")

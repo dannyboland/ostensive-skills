@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 """Tests for the guarantees quotepack makes. Run: python3 test_quotepack.py"""
+import contextlib
+import io
 import json
 import os
 import re
 import tempfile
 import unittest
+from unittest import mock
 
 import quotepack as qp
 
@@ -43,7 +46,8 @@ class QuotePackTest(unittest.TestCase):
         self.assertIn("“Is that enough?” she asked.", self.texts)
 
     def test_no_split_inside_a_quotation(self):
-        text = "It\u2019s a noise\u2014\u201cHe was walking. Suddenly he saw her.\u201d Then more. \"One. Two,\" she said."
+        text = ("It\u2019s a noise\u2014\u201cHe was walking. Suddenly he saw her.\u201d Then more. "
+                "\"One. Two,\" she said.")
         self.assertEqual(qp.split_sentences(text),
                          ["It\u2019s a noise\u2014\u201cHe was walking. Suddenly he saw her.\u201d",
                           "Then more.", "\"One. Two,\" she said."])
@@ -65,6 +69,10 @@ class QuotePackTest(unittest.TestCase):
         first, last = qp.resolve({"url": self.src, "match": "adults need 7-9"}, 1, self.snap)
         self.assertEqual(first, last)
         self.assertEqual(self.texts[first], "Adults need 7–9 hours, e.g. eight.")
+
+    def test_match_folds_typographic_spaces_and_dashes(self):
+        self.assertEqual(qp.fold("7\u20139\u00a0hours\u2009a\u202fnight \u2212 \u201cor\u201d so"),
+                         "7-9 hours a night - \"or\" so")
 
     def test_match_must_exist_and_be_unique(self):
         with self.assertRaises(qp.QuotePackError):
@@ -162,6 +170,53 @@ class QuotePackTest(unittest.TestCase):
     def test_local_sources_need_opt_in(self):
         with self.assertRaises(qp.QuotePackError):
             qp.snapshot(self.src, self.work)
+
+
+class CommandLineTest(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.dir = tmp.name
+        self.work = os.path.join(self.dir, "work")
+        self.srcs = []
+        for name in ("a.html", "b.html"):
+            self.srcs.append(os.path.join(self.dir, name))
+            with open(self.srcs[-1], "w", encoding="utf-8") as f:
+                f.write(PAGE)
+
+    def cli(self, *argv):
+        """(exit code or message, stdout) of one command-line run"""
+        out = io.StringIO()
+        with mock.patch("sys.argv", ["quotepack.py", *argv, "--workdir", self.work]), \
+                contextlib.redirect_stdout(out), self.assertRaises(SystemExit) as exit_:
+            qp.main()
+        return exit_.exception.code, out.getvalue()
+
+    def spec(self, content):
+        path = os.path.join(self.dir, "spec.json")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(content)
+        return path
+
+    def test_build_failures_are_one_line_errors(self):
+        out = os.path.join(self.dir, "out.html")
+        unreachable = json.dumps({"quotes": [{"url": "http://127.0.0.1:9/x", "match": "a"}]})
+        for spec in (self.spec("{"), os.path.join(self.dir, "missing.json"), self.spec(unreachable)):
+            code, _ = self.cli("build", spec, "-o", out)
+            self.assertRegex(code, r"^error: .+$")
+        self.assertFalse(os.path.exists(out))
+
+    def test_show_names_one_of_several_sources(self):
+        self.assertEqual(self.cli("fetch", *self.srcs, "--allow-local")[0], 0)
+        self.assertIn("--url", self.cli("show", "0", "2")[0])
+        code, out = self.cli("show", "0", "2", "--url", self.srcs[1])
+        self.assertEqual(code, 0)
+        self.assertIn("[0] ## On Sleep", out)
+
+    def test_navigation_reads_only_what_was_fetched(self):
+        code, _ = self.cli("search", "sleep", self.srcs[0])
+        self.assertIn("not fetched yet", code)
+        self.assertFalse(os.path.exists(os.path.join(self.work, "cache")))
 
 
 if __name__ == "__main__":

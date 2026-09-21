@@ -19,6 +19,7 @@ Usage:
   quotepack.py outline [URL ...]        headings with sentence numbers
   quotepack.py search "words" [URL ...] keyword search over fetched sources
   quotepack.py show FIRST [LAST]        print a run of sentences to read
+                                        (--url URL when several are fetched)
 
 Standard library only. Sources: web pages, plain text, EPUB, and PDF (which
 needs `pypdf` or the `pdftotext` binary).
@@ -41,8 +42,8 @@ import sys
 import urllib.parse
 import urllib.request
 import zipfile
-from xml.etree import ElementTree
 from html.parser import HTMLParser
+from xml.etree import ElementTree
 
 DEFAULT_WORKDIR = "quote-pack-work"
 USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) quotepack/1.0 (quote-with-attribution tool)"
@@ -150,7 +151,7 @@ class BlockExtractor(HTMLParser):
     def _flush(self):
         tags = {t for t, _ in self.stack}
         if "pre" in tags:  # code and other preformatted text keeps its line breaks
-            text = "\n".join(l.rstrip() for l in "".join(self.buf).strip("\n").splitlines())
+            text = "\n".join(line.rstrip() for line in "".join(self.buf).strip("\n").splitlines())
         else:
             text = " ".join("".join(self.buf).split())
         self.buf = []
@@ -276,9 +277,9 @@ def text_to_blocks(text, extracted=False):
     headings sit flush against the paragraph below them. Both are repaired
     here, because a paragraph cut in two would yield two partial "sentences".
     """
-    widths = sorted(len(l) for l in text.splitlines() if l.strip())
+    widths = sorted(len(line) for line in text.splitlines() if line.strip())
     full = widths[int(len(widths) * 0.9)] if widths else 0
-    indents = [len(l) - len(l.lstrip()) for l in text.splitlines() if l.strip()]
+    indents = [len(line) - len(line.lstrip()) for line in text.splitlines() if line.strip()]
     body = max(set(indents), key=indents.count) if indents else 0
     if extracted:
         # a footnote number set against the end of a sentence: "present tense.1 Screenplays"
@@ -317,9 +318,9 @@ def text_to_blocks(text, extracted=False):
     blocks = []
     for page_no, page in enumerate(text.split("\f"), 1):
         for para in re.split(r"\n\s*\n", page):
-            lines, run, prev = [l for l in para.splitlines() if l.strip()], [], ""
+            lines, run, prev = [line for line in para.splitlines() if line.strip()], [], ""
             inset = (extracted and len(lines) >= 2
-                     and all(len(l) - len(l.lstrip()) >= body + 2 for l in lines))
+                     and all(len(line) - len(line.lstrip()) >= body + 2 for line in lines))
             groups = []  # (kind, [lines])
             for line in lines:
                 if is_heading(line, prev):
@@ -353,8 +354,11 @@ def epub_to_blocks(raw):
         opf_path = next(e.get("full-path") for e in container.iter() if e.tag.endswith("rootfile"))
         opf = ElementTree.fromstring(z.read(opf_path))
     except (zipfile.BadZipFile, KeyError, StopIteration, ElementTree.ParseError) as e:
-        raise QuotePackError(f"not a readable EPUB ({e}); DRM-protected books can't be read")
-    local = lambda e: e.tag.rsplit("}", 1)[-1]
+        raise QuotePackError(f"not a readable EPUB ({e}); DRM-protected books can't be read") from e
+
+    def local(e):
+        return e.tag.rsplit("}", 1)[-1]
+
     meta = {}
     for e in opf.iter():  # a revised edition lists every author; keep them all
         if local(e) in ("title", "creator") and (e.text or "").strip():
@@ -386,20 +390,27 @@ def pdf_to_text(raw):
     """(text with form feeds between pages, title, author)"""
     try:
         import pypdf  # type: ignore
-        reader = pypdf.PdfReader(io.BytesIO(raw))
-        info = reader.metadata or {}
-        return ("\f".join((p.extract_text() or "") for p in reader.pages),
-                str(info.get("/Title") or ""), str(info.get("/Author") or ""))
     except ImportError:
-        pass
+        pypdf = None
+    if pypdf:
+        try:
+            reader = pypdf.PdfReader(io.BytesIO(raw))
+            info = reader.metadata or {}
+            return ("\f".join((p.extract_text() or "") for p in reader.pages),
+                    str(info.get("/Title") or ""), str(info.get("/Author") or ""))
+        except pypdf.errors.PyPdfError as e:
+            raise QuotePackError(f"not a readable PDF ({e})") from e
     if shutil.which("pdftotext"):
         # -layout keeps line-end hyphens and word spacing. The default mode closes
         # hyphens up ("selfparody"); -raw glues a one-letter word to the next ("Atense").
         out = subprocess.run(["pdftotext", "-layout", "-enc", "UTF-8", "-", "-"], input=raw,
-                             capture_output=True, check=True)
+                             capture_output=True, check=False)
+        if out.returncode:
+            raise QuotePackError(f"not a readable PDF ({out.stderr.decode('utf-8', 'replace').strip()})")
         info = {}
         if shutil.which("pdfinfo"):
-            res = subprocess.run(["pdfinfo", "-enc", "UTF-8", "-"], input=raw, capture_output=True)
+            res = subprocess.run(["pdfinfo", "-enc", "UTF-8", "-"], input=raw, capture_output=True,
+                                 check=False)
             info = dict(re.findall(r"^(Title|Author):\s*(.+)$", res.stdout.decode("utf-8", "replace"), re.M))
         return out.stdout.decode("utf-8", "replace"), info.get("Title", ""), info.get("Author", "")
     raise QuotePackError("PDF source needs `pip install pypdf` or the pdftotext binary")
@@ -497,24 +508,30 @@ def download(url, allow_local):
         if not allow_local:
             raise QuotePackError(f"{url}: local files need --allow-local")
         path = local_path(url)
-        with open(path, "rb") as f:
-            raw = f.read()
+        try:
+            with open(path, "rb") as f:
+                raw = f.read()
+        except OSError as e:
+            raise QuotePackError(f"{url}: {e}") from e
         ext = os.path.splitext(path)[1].lower()
         ctype = {".pdf": "application/pdf", ".txt": "text/plain", ".md": "text/plain",
                  ".epub": "application/epub+zip"}.get(ext, "text/html")
         return raw, ctype, canonical(url)
-    req = urllib.request.Request(canonical(url), headers={
+    req = urllib.request.Request(canonical(url), headers={  # noqa: S310 canonical() allows only http(s)
         "User-Agent": USER_AGENT,
         "Accept": "text/html,application/xhtml+xml,application/pdf,text/plain;q=0.9,*/*;q=0.5",
         "Accept-Language": "en",
     })
-    with urllib.request.urlopen(req, timeout=30) as resp:
-        raw = resp.read(MAX_BYTES + 1)
-        if len(raw) > MAX_BYTES:
-            raise QuotePackError(f"{url}: larger than {MAX_BYTES} bytes")
-        if resp.headers.get("Content-Encoding") == "gzip":
-            raw = gzip.decompress(raw)
-        return raw, resp.headers.get("Content-Type", ""), resp.geturl()
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:  # noqa: S310 canonical() allows only http(s)
+            raw = resp.read(MAX_BYTES + 1)
+            if len(raw) > MAX_BYTES:
+                raise QuotePackError(f"{url}: larger than {MAX_BYTES} bytes")
+            if resp.headers.get("Content-Encoding") == "gzip":
+                raw = gzip.decompress(raw)
+            return raw, resp.headers.get("Content-Type", ""), resp.geturl()
+    except OSError as e:  # URLError, timeouts, bad gzip
+        raise QuotePackError(f"{url}: {e}") from e
 
 
 def snapshot(url, workdir, refresh=False, allow_local=False, whole_page=False):
@@ -601,9 +618,9 @@ def write_listing(snap, workdir):
 # ---------------------------------------------------------------------------
 # Locators
 # ---------------------------------------------------------------------------
-FOLD = str.maketrans({"‘": "'", "’": "'", "“": '"', "”": '"',
-                      "–": "-", "—": "-", "−": "-", " ": " ",
-                      " ": " ", " ": " "})
+FOLD = str.maketrans({"\u2018": "'", "\u2019": "'", "\u201c": '"', "\u201d": '"',
+                      "\u2013": "-", "\u2014": "-", "\u2212": "-",
+                      "\u00a0": " ", "\u2009": " ", "\u202f": " "})
 
 
 def fold(s):
@@ -692,9 +709,16 @@ def locate(item, n, snap):
     return first, last
 
 
+def read_json(path):
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError) as e:
+        raise QuotePackError(f"{path}: {e}") from e
+
+
 def load_spec(path):
-    with open(path, encoding="utf-8") as f:
-        spec = json.load(f)
+    spec = read_json(path)
     if not isinstance(spec, dict) or set(spec) != {"quotes"} or not isinstance(spec["quotes"], list):
         raise QuotePackError('spec must be {"quotes": [...]} and nothing else')
     if not spec["quotes"]:
@@ -818,7 +842,10 @@ def fragment_link(snap, first, last):
         return (f"{url}#page={page}" if page else url), False
     if snap["type"] != "html" or snap["local"]:
         return url, False
-    enc = lambda s: urllib.parse.quote(s, safe="").replace("-", "%2D")
+
+    def enc(s):
+        return urllib.parse.quote(s, safe="").replace("-", "%2D")
+
     words = SENTINELS.sub("", " ".join(s["text"] for s in sents[first:last + 1])).split()
     if len(words) <= 8:
         frag = enc(" ".join(words))
@@ -960,15 +987,19 @@ def cmd_fetch(args):
 
 
 def cached_snapshots(args):
-    if args.urls:  # reading what is already fetched needs no opt-in
-        return [snapshot(u, args.workdir, allow_local=True) for u in args.urls]
-    snaps = []
-    for path in sorted(glob.glob(os.path.join(args.workdir, "cache", "*.json"))):
-        with open(path, encoding="utf-8") as f:
-            snaps.append(json.load(f))
-    if not snaps:
-        raise QuotePackError("nothing fetched yet")
-    return snaps
+    """Fetched sources: the ones named, or all of them. A page captured as the
+    document under review (-page) is kept apart from the sources."""
+    cache = os.path.join(args.workdir, "cache")
+    if args.urls:
+        paths = [os.path.join(cache, cache_key(u) + ".json") for u in args.urls]
+        missing = [u for u, p in zip(args.urls, paths) if not os.path.exists(p)]
+        if missing:
+            raise QuotePackError(f"not fetched yet: {', '.join(missing)}; run `fetch` first")
+    else:
+        paths = sorted(p for p in glob.glob(os.path.join(cache, "*.json")) if not p.endswith("-page.json"))
+        if not paths:
+            raise QuotePackError("nothing fetched yet")
+    return [read_json(p) for p in paths]
 
 
 def cmd_outline(args):
@@ -977,7 +1008,7 @@ def cmd_outline(args):
         sents = snap["sentences"]
         print(f"# {snap['title'] or source_name(snap)}  ({snap['url']}, {len(sents)} sentences)")
         heads = [i for i, s in enumerate(sents) if s["kind"] == "h"]
-        for i, nxt in zip(heads, heads[1:] + [len(sents)]):
+        for i, nxt in zip(heads, [*heads[1:], len(sents)]):
             print(f"[{i}] {plain(sents[i]['text'])}  ({nxt - i - 1})")
         print()
     return 0
@@ -987,7 +1018,7 @@ def cmd_show(args):
     """Print a run of sentences as the listing has them, to read around a hit."""
     snaps = cached_snapshots(args)
     if len(snaps) > 1:
-        raise QuotePackError("several sources are fetched; name the one to show")
+        raise QuotePackError("several sources are fetched; name the one to show with --url")
     sents, marks = snaps[0]["sentences"], MARKS
     first, last = max(0, args.first), min(len(sents) - 1, args.last if args.last is not None else args.first + 40)
     for i in range(first, last + 1):
@@ -1026,7 +1057,7 @@ def cmd_search(args):
             if terms & bag and score:
                 hits.append((score / (1 + math.log(1 + len(bag)) / 4), snap, i))
     hits.sort(key=lambda h: -h[0])
-    for score, snap, i in hits[:args.limit]:
+    for _, snap, i in hits[:args.limit]:
         where = section_of(snap, i)
         print(f"{snap['title'] or source_name(snap)}" + (f" > {plain(where)}" if where else ""))
         print(f"  [{i}] {plain(snap['sentences'][i]['text'])}\n")
@@ -1077,7 +1108,8 @@ def add_navigation(sub, common):
     w = sub.add_parser("show", parents=[common], help="print sentences FIRST..LAST of a fetched source")
     w.add_argument("first", type=int)
     w.add_argument("last", type=int, nargs="?", help="default: FIRST + 40")
-    w.add_argument("urls", nargs="*", help="needed only when several sources are fetched")
+    w.add_argument("--url", dest="urls", action="append", default=[],
+                   help="needed only when several sources are fetched")
     w.set_defaults(func=cmd_show)
     s = sub.add_parser("search", parents=[common], help="keyword search across fetched sources")
     s.add_argument("query")
@@ -1111,7 +1143,7 @@ def main():
     args = ap.parse_args()
     try:
         sys.exit(args.func(args))
-    except QuotePackError as e:
+    except (QuotePackError, OSError) as e:
         sys.exit(f"error: {e}")
 
 

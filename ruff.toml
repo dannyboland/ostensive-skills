@@ -1,0 +1,20 @@
+line-length = 120
+target-version = "py39"
+
+[lint]
+select = [
+    "B",  # flake8-bugbear
+    "E",  # pycodestyle: Error
+    "F",  # pyflakes
+    "I",  # isort
+    "RUF",  # ruff
+    "S",  # flake8-bandit
+    "UP",  # pyupgrade
+    "W",  # pycodestyle: Warning
+]
+ignore = [
+    "RUF001",  # curly quotes and dashes in strings are the subject matter
+    "S314",  # parsing stays in the standard library by design
+    "S603",  # converters are run with fixed arguments
+    "S607",  # converters are found on PATH
+]

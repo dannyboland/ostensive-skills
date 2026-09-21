@@ -69,6 +69,7 @@ tools/sync-shared.sh
 cd plugins/ostensive/skills/quote-pack/scripts && python3 test_quotepack.py
 cd plugins/ostensive/skills/quote-review/scripts && python3 test_quotereview.py
 claude plugin validate . --strict
+uvx ruff check
 ```
 
 Each test suite includes a check of the central claim: every word on a built
